@@ -311,4 +311,4 @@ curl -X DELETE http://127.0.0.1:37777/api/pending-queue/failed
 
 ## License
 
-[AGPL-3.0](LICENSE)
+[Apache-2.0](LICENSE)
