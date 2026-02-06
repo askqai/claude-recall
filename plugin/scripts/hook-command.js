@@ -1202,8 +1202,25 @@ function buildRecoveryContext(db, crashedSession, charBudget) {
      WHERE content_session_id = ?
      ORDER BY id ASC`
   ).all(sid);
-  const obsByPrompt = /* @__PURE__ */ new Map();
+  const regularObs = [];
+  const assistantResponsesByPrompt = /* @__PURE__ */ new Map();
   for (const o of observations) {
+    if (o.tool_name === "_assistant_responses") {
+      try {
+        const responses = JSON.parse(o.tool_response ?? "[]");
+        for (const r of responses) {
+          if (!assistantResponsesByPrompt.has(r.prompt_number)) {
+            assistantResponsesByPrompt.set(r.prompt_number, r.text);
+          }
+        }
+      } catch {
+      }
+    } else {
+      regularObs.push(o);
+    }
+  }
+  const obsByPrompt = /* @__PURE__ */ new Map();
+  for (const o of regularObs) {
     const pn = o.prompt_number ?? 0;
     if (!obsByPrompt.has(pn)) obsByPrompt.set(pn, []);
     obsByPrompt.get(pn).push(o);
@@ -1211,13 +1228,14 @@ function buildRecoveryContext(db, crashedSession, charBudget) {
   const allPromptNums = /* @__PURE__ */ new Set();
   for (const p of prompts) allPromptNums.add(p.prompt_number);
   for (const pn of obsByPrompt.keys()) allPromptNums.add(pn);
+  for (const pn of assistantResponsesByPrompt.keys()) allPromptNums.add(pn);
   const sortedNums = [...allPromptNums].sort((a, b) => a - b);
   const promptByNum = /* @__PURE__ */ new Map();
   for (const p of prompts) promptByNum.set(p.prompt_number, p);
   const lines = [];
   const statusLabel = crashedSession.status === "active" ? "interrupted" : "completed";
   lines.push(`# Previous Session \u2014 ${crashedSession.project}`);
-  lines.push(`Last session (${statusLabel}, started ${crashedSession.started_at}, ${crashedSession.prompt_counter} prompts, ${observations.length} tool uses).`);
+  lines.push(`Last session (${statusLabel}, started ${crashedSession.started_at}, ${crashedSession.prompt_counter} prompts, ${regularObs.length} tool uses).`);
   lines.push(`Full reconstruction below so you can continue where the user left off.
 `);
   let used = lines.join("\n").length;
@@ -1245,6 +1263,16 @@ function buildRecoveryContext(db, crashedSession, charBudget) {
         lines.push(oLine);
         used += oLine.length;
       }
+    }
+    const assistantText = assistantResponsesByPrompt.get(pn);
+    if (assistantText && used < charBudget - 200) {
+      const cappedText = assistantText.length > 1500 ? assistantText.slice(0, 1500) + "..." : assistantText;
+      const aLine = `
+**Claude's response:**
+${cappedText}
+`;
+      lines.push(aLine);
+      used += aLine.length;
     }
   }
   return lines.join("\n").trim();
@@ -1472,8 +1500,75 @@ var observationHandler = {
 };
 
 // src/cli/handlers/summarize.ts
+import { readFileSync as readFileSync3 } from "fs";
+var MAX_RESPONSE_CHARS = 1e4;
+function extractText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.filter((block) => block.type === "text" && typeof block.text === "string").map((block) => block.text).join("\n");
+  }
+  return "";
+}
 var summarizeHandler = {
-  async execute(_input) {
+  async execute(input) {
+    const { sessionId, cwd, transcriptPath } = input;
+    if (!transcriptPath || !sessionId) {
+      return { continue: true, suppressOutput: true };
+    }
+    let transcriptData;
+    try {
+      transcriptData = readFileSync3(transcriptPath, "utf-8");
+    } catch (err) {
+      logger.debug("HOOK", `Could not read transcript: ${err}`);
+      return { continue: true, suppressOutput: true };
+    }
+    const project = getProjectName(cwd);
+    const now = /* @__PURE__ */ new Date();
+    const nowEpoch = Math.floor(now.getTime() / 1e3);
+    const lines = transcriptData.split("\n").filter((l) => l.trim());
+    const assistantResponses = [];
+    let promptNumber = 0;
+    for (const line of lines) {
+      try {
+        const msg = JSON.parse(line);
+        const role = msg.role ?? msg.message?.role;
+        if (role === "user") {
+          promptNumber++;
+        }
+        if (role === "assistant") {
+          const content = msg.content ?? msg.message?.content;
+          const text = extractText(content);
+          if (text.trim()) {
+            assistantResponses.push(JSON.stringify({
+              prompt_number: promptNumber,
+              text: text.length > MAX_RESPONSE_CHARS ? text.slice(0, MAX_RESPONSE_CHARS) + "...[truncated]" : text
+            }));
+          }
+        }
+      } catch {
+      }
+    }
+    if (assistantResponses.length === 0) {
+      return { continue: true, suppressOutput: true };
+    }
+    const db = openDatabase();
+    try {
+      db.run(
+        `INSERT OR IGNORE INTO sdk_sessions (content_session_id, project, started_at, started_at_epoch, status)
+         VALUES (?, ?, ?, ?, 'active')`,
+        [sessionId, project, now.toISOString(), nowEpoch]
+      );
+      const responsesJson = JSON.stringify(assistantResponses.map((r) => JSON.parse(r)));
+      const capped = responsesJson.length > 5e4 ? responsesJson.slice(0, 5e4) + "...[truncated]" : responsesJson;
+      db.run(
+        `INSERT INTO raw_observations (content_session_id, project, tool_name, tool_input, tool_response, cwd, prompt_number, created_at, created_at_epoch)
+         VALUES (?, ?, '_assistant_responses', NULL, ?, ?, ?, ?, ?)`,
+        [sessionId, project, capped, cwd, promptNumber, now.toISOString(), nowEpoch]
+      );
+      logger.debug("HOOK", `Stored ${assistantResponses.length} assistant responses from transcript`);
+    } finally {
+      db.close();
+    }
     return { continue: true, suppressOutput: true };
   }
 };
@@ -1484,7 +1579,7 @@ import { basename as basename2 } from "path";
 // src/shared/worker-utils.ts
 import path2 from "path";
 import { homedir as homedir4 } from "os";
-import { readFileSync as readFileSync3 } from "fs";
+import { readFileSync as readFileSync4 } from "fs";
 
 // src/shared/hook-constants.ts
 var HOOK_TIMEOUTS = {
@@ -1564,7 +1659,7 @@ async function isWorkerHealthy() {
 }
 function getPluginVersion() {
   const packageJsonPath = path2.join(MARKETPLACE_ROOT, "package.json");
-  const packageJson = JSON.parse(readFileSync3(packageJsonPath, "utf-8"));
+  const packageJson = JSON.parse(readFileSync4(packageJsonPath, "utf-8"));
   return packageJson.version;
 }
 async function getWorkerVersion() {

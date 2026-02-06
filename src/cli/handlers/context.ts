@@ -142,18 +142,40 @@ function buildRecoveryContext(
      ORDER BY id ASC`
   ).all(sid) as RawObsRow[];
 
-  // Group observations by prompt_number
-  const obsByPrompt = new Map<number, RawObsRow[]>();
+  // Separate assistant responses from regular tool observations
+  const regularObs: RawObsRow[] = [];
+  const assistantResponsesByPrompt = new Map<number, string>();
+
   for (const o of observations) {
+    if (o.tool_name === '_assistant_responses') {
+      // Parse stored assistant responses: [{prompt_number, text}, ...]
+      try {
+        const responses = JSON.parse(o.tool_response ?? '[]') as Array<{ prompt_number: number; text: string }>;
+        for (const r of responses) {
+          // Keep the latest (last stored) response per prompt
+          if (!assistantResponsesByPrompt.has(r.prompt_number)) {
+            assistantResponsesByPrompt.set(r.prompt_number, r.text);
+          }
+        }
+      } catch { /* skip malformed */ }
+    } else {
+      regularObs.push(o);
+    }
+  }
+
+  // Group regular observations by prompt_number
+  const obsByPrompt = new Map<number, RawObsRow[]>();
+  for (const o of regularObs) {
     const pn = o.prompt_number ?? 0;
     if (!obsByPrompt.has(pn)) obsByPrompt.set(pn, []);
     obsByPrompt.get(pn)!.push(o);
   }
 
-  // Find all prompt numbers (from prompts and observations)
+  // Find all prompt numbers (from prompts, observations, and assistant responses)
   const allPromptNums = new Set<number>();
   for (const p of prompts) allPromptNums.add(p.prompt_number);
   for (const pn of obsByPrompt.keys()) allPromptNums.add(pn);
+  for (const pn of assistantResponsesByPrompt.keys()) allPromptNums.add(pn);
   const sortedNums = [...allPromptNums].sort((a, b) => a - b);
 
   // Build prompt lookup
@@ -163,7 +185,7 @@ function buildRecoveryContext(
   const lines: string[] = [];
   const statusLabel = crashedSession.status === 'active' ? 'interrupted' : 'completed';
   lines.push(`# Previous Session — ${crashedSession.project}`);
-  lines.push(`Last session (${statusLabel}, started ${crashedSession.started_at}, ${crashedSession.prompt_counter} prompts, ${observations.length} tool uses).`);
+  lines.push(`Last session (${statusLabel}, started ${crashedSession.started_at}, ${crashedSession.prompt_counter} prompts, ${regularObs.length} tool uses).`);
   lines.push(`Full reconstruction below so you can continue where the user left off.\n`);
 
   let used = lines.join('\n').length;
@@ -174,6 +196,7 @@ function buildRecoveryContext(
       break;
     }
 
+    // User prompt
     const prompt = promptByNum.get(pn);
     if (prompt) {
       const promptText = prompt.prompt_text.length > 2000
@@ -184,6 +207,7 @@ function buildRecoveryContext(
       used += pLine.length;
     }
 
+    // Tool observations for this prompt
     const obs = obsByPrompt.get(pn);
     if (obs && obs.length > 0) {
       for (const o of obs) {
@@ -192,6 +216,17 @@ function buildRecoveryContext(
         lines.push(oLine);
         used += oLine.length;
       }
+    }
+
+    // Claude's response for this prompt
+    const assistantText = assistantResponsesByPrompt.get(pn);
+    if (assistantText && used < charBudget - 200) {
+      const cappedText = assistantText.length > 1500
+        ? assistantText.slice(0, 1500) + '...'
+        : assistantText;
+      const aLine = `\n**Claude's response:**\n${cappedText}\n`;
+      lines.push(aLine);
+      used += aLine.length;
     }
   }
 
