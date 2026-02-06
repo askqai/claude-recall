@@ -1,49 +1,34 @@
 /**
  * Session End Handler - SessionEnd
  *
- * Marks the session as completed in the database when the user exits Claude Code.
- * This ensures sessions don't remain stuck in 'active' status forever.
+ * Marks session as completed directly in SQLite.
+ * No worker daemon needed.
  */
 
 import type { EventHandler, NormalizedHookInput, HookResult } from '../types.js';
-import { ensureWorkerRunning, getWorkerPort } from '../../shared/worker-utils.js';
+import { openDatabase } from '../../services/sqlite/DirectDB.js';
 import { logger } from '../../utils/logger.js';
 
 export const sessionEndHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
-    // Ensure worker is running before any other logic
-    await ensureWorkerRunning();
-
     const { sessionId } = input;
-    const port = getWorkerPort();
-
-    logger.debug('HOOK', 'SessionEnd: Marking session as completed', {
-      contentSessionId: sessionId,
-      workerPort: port
-    });
+    const now = new Date();
+    const db = openDatabase();
 
     try {
-      // Send to worker to mark session as completed
-      const response = await fetch(`http://127.0.0.1:${port}/api/sessions/end`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contentSessionId: sessionId
-        })
-      });
+      db.run(
+        `UPDATE sdk_sessions SET status = 'completed', completed_at = ?, completed_at_epoch = ?
+         WHERE content_session_id = ? AND status = 'active'`,
+        [now.toISOString(), Math.floor(now.getTime() / 1000), sessionId]
+      );
 
-      if (!response.ok) {
-        logger.warn('HOOK', 'SessionEnd: Failed to mark session completed', {
-          contentSessionId: sessionId,
-          status: response.status
-        });
-      } else {
-        logger.debug('HOOK', 'SessionEnd: Session marked as completed', { contentSessionId: sessionId });
-      }
+      logger.debug('HOOK', 'SessionEnd: Session marked completed', { contentSessionId: sessionId });
     } catch (error) {
-      // Don't fail the hook if we can't reach the worker
-      // The session will stay active but that's better than blocking the user
-      logger.warn('HOOK', 'SessionEnd: Could not reach worker', { contentSessionId: sessionId, error });
+      logger.warn('HOOK', 'SessionEnd: Failed to mark session completed', {
+        contentSessionId: sessionId
+      });
+    } finally {
+      db.close();
     }
 
     return { continue: true, suppressOutput: true };

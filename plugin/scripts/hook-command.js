@@ -84,8 +84,8 @@ var rawAdapter = {
 };
 
 // src/cli/adapters/index.ts
-function getPlatformAdapter(platform) {
-  switch (platform) {
+function getPlatformAdapter(platform2) {
+  switch (platform2) {
     case "claude-code":
       return claudeCodeAdapter;
     case "cursor":
@@ -93,19 +93,161 @@ function getPlatformAdapter(platform) {
     case "raw":
       return rawAdapter;
     default:
-      throw new Error(`Unknown platform: ${platform}`);
+      throw new Error(`Unknown platform: ${platform2}`);
   }
 }
 
-// src/shared/worker-utils.ts
-import path from "path";
+// src/services/sqlite/DirectDB.ts
+import { Database } from "bun:sqlite";
+
+// src/shared/paths.ts
+import { join as join3, dirname as dirname2, basename } from "path";
 import { homedir as homedir3 } from "os";
-import { readFileSync as readFileSync3 } from "fs";
+import { mkdirSync as mkdirSync3 } from "fs";
+import { fileURLToPath } from "url";
+
+// src/shared/SettingsDefaultsManager.ts
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { join, dirname } from "path";
+import { homedir } from "os";
+
+// src/constants/observation-metadata.ts
+var DEFAULT_OBSERVATION_TYPES_STRING = "bugfix,feature,refactor,discovery,decision,change";
+var DEFAULT_OBSERVATION_CONCEPTS_STRING = "how-it-works,why-it-exists,what-changed,problem-solution,gotcha,pattern,trade-off";
+
+// src/shared/SettingsDefaultsManager.ts
+var SettingsDefaultsManager = class {
+  /**
+   * Default values for all settings
+   */
+  static DEFAULTS = {
+    CLAUDE_RECALL_MODEL: "claude-sonnet-4-5",
+    CLAUDE_RECALL_CONTEXT_OBSERVATIONS: "50",
+    CLAUDE_RECALL_WORKER_PORT: "37777",
+    CLAUDE_RECALL_WORKER_HOST: "127.0.0.1",
+    CLAUDE_RECALL_SKIP_TOOLS: "ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion",
+    // AI Provider Configuration
+    CLAUDE_RECALL_PROVIDER: "claude",
+    // Default to Claude
+    CLAUDE_RECALL_GEMINI_API_KEY: "",
+    // Empty by default, can be set via UI or env
+    CLAUDE_RECALL_GEMINI_MODEL: "gemini-2.5-flash-lite",
+    // Default Gemini model (highest free tier RPM)
+    CLAUDE_RECALL_GEMINI_RATE_LIMITING_ENABLED: "true",
+    // Rate limiting ON by default for free tier users
+    CLAUDE_RECALL_OPENROUTER_API_KEY: "",
+    // Empty by default, can be set via UI or env
+    CLAUDE_RECALL_OPENROUTER_MODEL: "xiaomi/mimo-v2-flash:free",
+    // Default OpenRouter model (free tier)
+    CLAUDE_RECALL_OPENROUTER_SITE_URL: "",
+    // Optional: for OpenRouter analytics
+    CLAUDE_RECALL_OPENROUTER_APP_NAME: "claude-recall",
+    // App name for OpenRouter analytics
+    CLAUDE_RECALL_OPENROUTER_MAX_CONTEXT_MESSAGES: "20",
+    // Max messages in context window
+    CLAUDE_RECALL_OPENROUTER_MAX_TOKENS: "100000",
+    // Max estimated tokens (~100k safety limit)
+    // System Configuration
+    CLAUDE_RECALL_DATA_DIR: join(homedir(), ".claude-recall"),
+    CLAUDE_RECALL_LOG_LEVEL: "INFO",
+    CLAUDE_RECALL_PYTHON_VERSION: "3.13",
+    CLAUDE_CODE_PATH: "",
+    // Empty means auto-detect via 'which claude'
+    CLAUDE_RECALL_MODE: "code",
+    // Default mode profile
+    // Token Economics
+    CLAUDE_RECALL_CONTEXT_SHOW_READ_TOKENS: "true",
+    CLAUDE_RECALL_CONTEXT_SHOW_WORK_TOKENS: "true",
+    CLAUDE_RECALL_CONTEXT_SHOW_SAVINGS_AMOUNT: "true",
+    CLAUDE_RECALL_CONTEXT_SHOW_SAVINGS_PERCENT: "true",
+    // Observation Filtering
+    CLAUDE_RECALL_CONTEXT_OBSERVATION_TYPES: DEFAULT_OBSERVATION_TYPES_STRING,
+    CLAUDE_RECALL_CONTEXT_OBSERVATION_CONCEPTS: DEFAULT_OBSERVATION_CONCEPTS_STRING,
+    // Display Configuration
+    CLAUDE_RECALL_CONTEXT_FULL_COUNT: "5",
+    CLAUDE_RECALL_CONTEXT_FULL_FIELD: "narrative",
+    CLAUDE_RECALL_CONTEXT_SESSION_COUNT: "10",
+    // Feature Toggles
+    CLAUDE_RECALL_CONTEXT_SHOW_LAST_SUMMARY: "true",
+    CLAUDE_RECALL_CONTEXT_SHOW_LAST_MESSAGE: "false"
+  };
+  /**
+   * Get all defaults as an object
+   */
+  static getAllDefaults() {
+    return { ...this.DEFAULTS };
+  }
+  /**
+   * Get a default value from defaults (no environment variable override)
+   */
+  static get(key) {
+    return this.DEFAULTS[key];
+  }
+  /**
+   * Get an integer default value
+   */
+  static getInt(key) {
+    const value = this.get(key);
+    return parseInt(value, 10);
+  }
+  /**
+   * Get a boolean default value
+   */
+  static getBool(key) {
+    const value = this.get(key);
+    return value === "true";
+  }
+  /**
+   * Load settings from file with fallback to defaults
+   * Returns merged settings with defaults as fallback
+   * Handles all errors (missing file, corrupted JSON, permissions) by returning defaults
+   */
+  static loadFromFile(settingsPath) {
+    try {
+      if (!existsSync(settingsPath)) {
+        const defaults = this.getAllDefaults();
+        try {
+          const dir = dirname(settingsPath);
+          if (!existsSync(dir)) {
+            mkdirSync(dir, { recursive: true });
+          }
+          writeFileSync(settingsPath, JSON.stringify(defaults, null, 2), "utf-8");
+          console.log("[SETTINGS] Created settings file with defaults:", settingsPath);
+        } catch (error) {
+          console.warn("[SETTINGS] Failed to create settings file, using in-memory defaults:", settingsPath, error);
+        }
+        return defaults;
+      }
+      const settingsData = readFileSync(settingsPath, "utf-8");
+      const settings = JSON.parse(settingsData);
+      let flatSettings = settings;
+      if (settings.env && typeof settings.env === "object") {
+        flatSettings = settings.env;
+        try {
+          writeFileSync(settingsPath, JSON.stringify(flatSettings, null, 2), "utf-8");
+          console.log("[SETTINGS] Migrated settings file from nested to flat schema:", settingsPath);
+        } catch (error) {
+          console.warn("[SETTINGS] Failed to auto-migrate settings file:", settingsPath, error);
+        }
+      }
+      const result = { ...this.DEFAULTS };
+      for (const key of Object.keys(this.DEFAULTS)) {
+        if (flatSettings[key] !== void 0) {
+          result[key] = flatSettings[key];
+        }
+      }
+      return result;
+    } catch (error) {
+      console.warn("[SETTINGS] Failed to load settings, using defaults:", settingsPath, error);
+      return this.getAllDefaults();
+    }
+  }
+};
 
 // src/utils/logger.ts
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
-import { join } from "path";
-import { homedir } from "os";
+import { appendFileSync, existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "fs";
+import { join as join2 } from "path";
+import { homedir as homedir2 } from "os";
 var LogLevel = /* @__PURE__ */ ((LogLevel2) => {
   LogLevel2[LogLevel2["DEBUG"] = 0] = "DEBUG";
   LogLevel2[LogLevel2["INFO"] = 1] = "INFO";
@@ -114,7 +256,7 @@ var LogLevel = /* @__PURE__ */ ((LogLevel2) => {
   LogLevel2[LogLevel2["SILENT"] = 4] = "SILENT";
   return LogLevel2;
 })(LogLevel || {});
-var DEFAULT_DATA_DIR = join(homedir(), ".claude-recall");
+var DEFAULT_DATA_DIR = join2(homedir2(), ".claude-recall");
 var Logger = class {
   level = null;
   useColor;
@@ -130,12 +272,12 @@ var Logger = class {
     if (this.logFileInitialized) return;
     this.logFileInitialized = true;
     try {
-      const logsDir = join(DEFAULT_DATA_DIR, "logs");
-      if (!existsSync(logsDir)) {
-        mkdirSync(logsDir, { recursive: true });
+      const logsDir = join2(DEFAULT_DATA_DIR, "logs");
+      if (!existsSync2(logsDir)) {
+        mkdirSync2(logsDir, { recursive: true });
       }
       const date = (/* @__PURE__ */ new Date()).toISOString().split("T")[0];
-      this.logFilePath = join(logsDir, `claude-recall-${date}.log`);
+      this.logFilePath = join2(logsDir, `claude-recall-${date}.log`);
     } catch (error) {
       console.error("[LOGGER] Failed to initialize log file:", error);
       this.logFilePath = null;
@@ -148,9 +290,9 @@ var Logger = class {
   getLevel() {
     if (this.level === null) {
       try {
-        const settingsPath = join(DEFAULT_DATA_DIR, "settings.json");
-        if (existsSync(settingsPath)) {
-          const settingsData = readFileSync(settingsPath, "utf-8");
+        const settingsPath = join2(DEFAULT_DATA_DIR, "settings.json");
+        if (existsSync2(settingsPath)) {
+          const settingsData = readFileSync2(settingsPath, "utf-8");
           const settings = JSON.parse(settingsData);
           const envLevel = (settings.CLAUDE_RECALL_LOG_LEVEL || "INFO").toUpperCase();
           this.level = LogLevel[envLevel] ?? 1 /* INFO */;
@@ -391,6 +533,854 @@ ${data.stack}` : ` ${data.message}`;
 };
 var logger = new Logger();
 
+// src/shared/paths.ts
+function getDirname() {
+  if (typeof __dirname !== "undefined") {
+    return __dirname;
+  }
+  return dirname2(fileURLToPath(import.meta.url));
+}
+var _dirname = getDirname();
+var DATA_DIR = SettingsDefaultsManager.get("CLAUDE_RECALL_DATA_DIR");
+var CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || join3(homedir3(), ".claude");
+var ARCHIVES_DIR = join3(DATA_DIR, "archives");
+var LOGS_DIR = join3(DATA_DIR, "logs");
+var TRASH_DIR = join3(DATA_DIR, "trash");
+var BACKUPS_DIR = join3(DATA_DIR, "backups");
+var MODES_DIR = join3(DATA_DIR, "modes");
+var USER_SETTINGS_PATH = join3(DATA_DIR, "settings.json");
+var DB_PATH = join3(DATA_DIR, "claude-recall.db");
+var VECTOR_DB_DIR = join3(DATA_DIR, "vector-db");
+var CLAUDE_SETTINGS_PATH = join3(CLAUDE_CONFIG_DIR, "settings.json");
+var CLAUDE_COMMANDS_DIR = join3(CLAUDE_CONFIG_DIR, "commands");
+var CLAUDE_MD_PATH = join3(CLAUDE_CONFIG_DIR, "CLAUDE.md");
+function ensureDir(dirPath) {
+  mkdirSync3(dirPath, { recursive: true });
+}
+
+// src/services/sqlite/migrations/runner.ts
+var MigrationRunner = class {
+  constructor(db) {
+    this.db = db;
+  }
+  /**
+   * Run all migrations in order
+   * This is the only public method - all migrations are internal
+   */
+  runAllMigrations() {
+    this.initializeSchema();
+    this.ensureWorkerPortColumn();
+    this.ensurePromptTrackingColumns();
+    this.removeSessionSummariesUniqueConstraint();
+    this.addObservationHierarchicalFields();
+    this.makeObservationsTextNullable();
+    this.createUserPromptsTable();
+    this.ensureDiscoveryTokensColumn();
+    this.createPendingMessagesTable();
+    this.renameSessionIdColumns();
+    this.repairSessionIdColumnRename();
+    this.addFailedAtEpochColumn();
+    this.addRawObservationsTable();
+  }
+  /**
+   * Initialize database schema using migrations (migration004)
+   * This runs the core SDK tables migration if no tables exist
+   */
+  initializeSchema() {
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS schema_versions (
+        id INTEGER PRIMARY KEY,
+        version INTEGER UNIQUE NOT NULL,
+        applied_at TEXT NOT NULL
+      )
+    `);
+    const appliedVersions = this.db.prepare("SELECT version FROM schema_versions ORDER BY version").all();
+    const maxApplied = appliedVersions.length > 0 ? Math.max(...appliedVersions.map((v) => v.version)) : 0;
+    if (maxApplied === 0) {
+      logger.info("DB", "Initializing fresh database with migration004");
+      this.db.run(`
+        CREATE TABLE IF NOT EXISTS sdk_sessions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          content_session_id TEXT UNIQUE NOT NULL,
+          memory_session_id TEXT UNIQUE,
+          project TEXT NOT NULL,
+          user_prompt TEXT,
+          started_at TEXT NOT NULL,
+          started_at_epoch INTEGER NOT NULL,
+          completed_at TEXT,
+          completed_at_epoch INTEGER,
+          status TEXT CHECK(status IN ('active', 'completed', 'failed')) NOT NULL DEFAULT 'active'
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sdk_sessions_claude_id ON sdk_sessions(content_session_id);
+        CREATE INDEX IF NOT EXISTS idx_sdk_sessions_sdk_id ON sdk_sessions(memory_session_id);
+        CREATE INDEX IF NOT EXISTS idx_sdk_sessions_project ON sdk_sessions(project);
+        CREATE INDEX IF NOT EXISTS idx_sdk_sessions_status ON sdk_sessions(status);
+        CREATE INDEX IF NOT EXISTS idx_sdk_sessions_started ON sdk_sessions(started_at_epoch DESC);
+
+        CREATE TABLE IF NOT EXISTS observations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          memory_session_id TEXT NOT NULL,
+          project TEXT NOT NULL,
+          text TEXT NOT NULL,
+          type TEXT NOT NULL CHECK(type IN ('decision', 'bugfix', 'feature', 'refactor', 'discovery')),
+          created_at TEXT NOT NULL,
+          created_at_epoch INTEGER NOT NULL,
+          FOREIGN KEY(memory_session_id) REFERENCES sdk_sessions(memory_session_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_observations_sdk_session ON observations(memory_session_id);
+        CREATE INDEX IF NOT EXISTS idx_observations_project ON observations(project);
+        CREATE INDEX IF NOT EXISTS idx_observations_type ON observations(type);
+        CREATE INDEX IF NOT EXISTS idx_observations_created ON observations(created_at_epoch DESC);
+
+        CREATE TABLE IF NOT EXISTS session_summaries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          memory_session_id TEXT UNIQUE NOT NULL,
+          project TEXT NOT NULL,
+          request TEXT,
+          investigated TEXT,
+          learned TEXT,
+          completed TEXT,
+          next_steps TEXT,
+          files_read TEXT,
+          files_edited TEXT,
+          notes TEXT,
+          created_at TEXT NOT NULL,
+          created_at_epoch INTEGER NOT NULL,
+          FOREIGN KEY(memory_session_id) REFERENCES sdk_sessions(memory_session_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_session_summaries_sdk_session ON session_summaries(memory_session_id);
+        CREATE INDEX IF NOT EXISTS idx_session_summaries_project ON session_summaries(project);
+        CREATE INDEX IF NOT EXISTS idx_session_summaries_created ON session_summaries(created_at_epoch DESC);
+      `);
+      this.db.prepare("INSERT INTO schema_versions (version, applied_at) VALUES (?, ?)").run(4, (/* @__PURE__ */ new Date()).toISOString());
+      logger.info("DB", "Migration004 applied successfully");
+    }
+  }
+  /**
+   * Ensure worker_port column exists (migration 5)
+   */
+  ensureWorkerPortColumn() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(5);
+    if (applied) return;
+    const tableInfo = this.db.query("PRAGMA table_info(sdk_sessions)").all();
+    const hasWorkerPort = tableInfo.some((col) => col.name === "worker_port");
+    if (!hasWorkerPort) {
+      this.db.run("ALTER TABLE sdk_sessions ADD COLUMN worker_port INTEGER");
+      logger.debug("DB", "Added worker_port column to sdk_sessions table");
+    }
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(5, (/* @__PURE__ */ new Date()).toISOString());
+  }
+  /**
+   * Ensure prompt tracking columns exist (migration 6)
+   */
+  ensurePromptTrackingColumns() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(6);
+    if (applied) return;
+    const sessionsInfo = this.db.query("PRAGMA table_info(sdk_sessions)").all();
+    const hasPromptCounter = sessionsInfo.some((col) => col.name === "prompt_counter");
+    if (!hasPromptCounter) {
+      this.db.run("ALTER TABLE sdk_sessions ADD COLUMN prompt_counter INTEGER DEFAULT 0");
+      logger.debug("DB", "Added prompt_counter column to sdk_sessions table");
+    }
+    const observationsInfo = this.db.query("PRAGMA table_info(observations)").all();
+    const obsHasPromptNumber = observationsInfo.some((col) => col.name === "prompt_number");
+    if (!obsHasPromptNumber) {
+      this.db.run("ALTER TABLE observations ADD COLUMN prompt_number INTEGER");
+      logger.debug("DB", "Added prompt_number column to observations table");
+    }
+    const summariesInfo = this.db.query("PRAGMA table_info(session_summaries)").all();
+    const sumHasPromptNumber = summariesInfo.some((col) => col.name === "prompt_number");
+    if (!sumHasPromptNumber) {
+      this.db.run("ALTER TABLE session_summaries ADD COLUMN prompt_number INTEGER");
+      logger.debug("DB", "Added prompt_number column to session_summaries table");
+    }
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(6, (/* @__PURE__ */ new Date()).toISOString());
+  }
+  /**
+   * Remove UNIQUE constraint from session_summaries.memory_session_id (migration 7)
+   */
+  removeSessionSummariesUniqueConstraint() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(7);
+    if (applied) return;
+    const summariesIndexes = this.db.query("PRAGMA index_list(session_summaries)").all();
+    const hasUniqueConstraint = summariesIndexes.some((idx) => idx.unique === 1);
+    if (!hasUniqueConstraint) {
+      this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(7, (/* @__PURE__ */ new Date()).toISOString());
+      return;
+    }
+    logger.debug("DB", "Removing UNIQUE constraint from session_summaries.memory_session_id");
+    this.db.run("BEGIN TRANSACTION");
+    this.db.run(`
+      CREATE TABLE session_summaries_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        memory_session_id TEXT NOT NULL,
+        project TEXT NOT NULL,
+        request TEXT,
+        investigated TEXT,
+        learned TEXT,
+        completed TEXT,
+        next_steps TEXT,
+        files_read TEXT,
+        files_edited TEXT,
+        notes TEXT,
+        prompt_number INTEGER,
+        created_at TEXT NOT NULL,
+        created_at_epoch INTEGER NOT NULL,
+        FOREIGN KEY(memory_session_id) REFERENCES sdk_sessions(memory_session_id) ON DELETE CASCADE
+      )
+    `);
+    this.db.run(`
+      INSERT INTO session_summaries_new
+      SELECT id, memory_session_id, project, request, investigated, learned,
+             completed, next_steps, files_read, files_edited, notes,
+             prompt_number, created_at, created_at_epoch
+      FROM session_summaries
+    `);
+    this.db.run("DROP TABLE session_summaries");
+    this.db.run("ALTER TABLE session_summaries_new RENAME TO session_summaries");
+    this.db.run(`
+      CREATE INDEX idx_session_summaries_sdk_session ON session_summaries(memory_session_id);
+      CREATE INDEX idx_session_summaries_project ON session_summaries(project);
+      CREATE INDEX idx_session_summaries_created ON session_summaries(created_at_epoch DESC);
+    `);
+    this.db.run("COMMIT");
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(7, (/* @__PURE__ */ new Date()).toISOString());
+    logger.debug("DB", "Successfully removed UNIQUE constraint from session_summaries.memory_session_id");
+  }
+  /**
+   * Add hierarchical fields to observations table (migration 8)
+   */
+  addObservationHierarchicalFields() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(8);
+    if (applied) return;
+    const tableInfo = this.db.query("PRAGMA table_info(observations)").all();
+    const hasTitle = tableInfo.some((col) => col.name === "title");
+    if (hasTitle) {
+      this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(8, (/* @__PURE__ */ new Date()).toISOString());
+      return;
+    }
+    logger.debug("DB", "Adding hierarchical fields to observations table");
+    this.db.run(`
+      ALTER TABLE observations ADD COLUMN title TEXT;
+      ALTER TABLE observations ADD COLUMN subtitle TEXT;
+      ALTER TABLE observations ADD COLUMN facts TEXT;
+      ALTER TABLE observations ADD COLUMN narrative TEXT;
+      ALTER TABLE observations ADD COLUMN concepts TEXT;
+      ALTER TABLE observations ADD COLUMN files_read TEXT;
+      ALTER TABLE observations ADD COLUMN files_modified TEXT;
+    `);
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(8, (/* @__PURE__ */ new Date()).toISOString());
+    logger.debug("DB", "Successfully added hierarchical fields to observations table");
+  }
+  /**
+   * Make observations.text nullable (migration 9)
+   * The text field is deprecated in favor of structured fields (title, subtitle, narrative, etc.)
+   */
+  makeObservationsTextNullable() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(9);
+    if (applied) return;
+    const tableInfo = this.db.query("PRAGMA table_info(observations)").all();
+    const textColumn = tableInfo.find((col) => col.name === "text");
+    if (!textColumn || textColumn.notnull === 0) {
+      this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(9, (/* @__PURE__ */ new Date()).toISOString());
+      return;
+    }
+    logger.debug("DB", "Making observations.text nullable");
+    this.db.run("BEGIN TRANSACTION");
+    this.db.run(`
+      CREATE TABLE observations_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        memory_session_id TEXT NOT NULL,
+        project TEXT NOT NULL,
+        text TEXT,
+        type TEXT NOT NULL CHECK(type IN ('decision', 'bugfix', 'feature', 'refactor', 'discovery', 'change')),
+        title TEXT,
+        subtitle TEXT,
+        facts TEXT,
+        narrative TEXT,
+        concepts TEXT,
+        files_read TEXT,
+        files_modified TEXT,
+        prompt_number INTEGER,
+        created_at TEXT NOT NULL,
+        created_at_epoch INTEGER NOT NULL,
+        FOREIGN KEY(memory_session_id) REFERENCES sdk_sessions(memory_session_id) ON DELETE CASCADE
+      )
+    `);
+    this.db.run(`
+      INSERT INTO observations_new
+      SELECT id, memory_session_id, project, text, type, title, subtitle, facts,
+             narrative, concepts, files_read, files_modified, prompt_number,
+             created_at, created_at_epoch
+      FROM observations
+    `);
+    this.db.run("DROP TABLE observations");
+    this.db.run("ALTER TABLE observations_new RENAME TO observations");
+    this.db.run(`
+      CREATE INDEX idx_observations_sdk_session ON observations(memory_session_id);
+      CREATE INDEX idx_observations_project ON observations(project);
+      CREATE INDEX idx_observations_type ON observations(type);
+      CREATE INDEX idx_observations_created ON observations(created_at_epoch DESC);
+    `);
+    this.db.run("COMMIT");
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(9, (/* @__PURE__ */ new Date()).toISOString());
+    logger.debug("DB", "Successfully made observations.text nullable");
+  }
+  /**
+   * Create user_prompts table with FTS5 support (migration 10)
+   */
+  createUserPromptsTable() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(10);
+    if (applied) return;
+    const tableInfo = this.db.query("PRAGMA table_info(user_prompts)").all();
+    if (tableInfo.length > 0) {
+      this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(10, (/* @__PURE__ */ new Date()).toISOString());
+      return;
+    }
+    logger.debug("DB", "Creating user_prompts table with FTS5 support");
+    this.db.run("BEGIN TRANSACTION");
+    this.db.run(`
+      CREATE TABLE user_prompts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT NOT NULL,
+        prompt_number INTEGER NOT NULL,
+        prompt_text TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        created_at_epoch INTEGER NOT NULL,
+        FOREIGN KEY(content_session_id) REFERENCES sdk_sessions(content_session_id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX idx_user_prompts_claude_session ON user_prompts(content_session_id);
+      CREATE INDEX idx_user_prompts_created ON user_prompts(created_at_epoch DESC);
+      CREATE INDEX idx_user_prompts_prompt_number ON user_prompts(prompt_number);
+      CREATE INDEX idx_user_prompts_lookup ON user_prompts(content_session_id, prompt_number);
+    `);
+    this.db.run(`
+      CREATE VIRTUAL TABLE user_prompts_fts USING fts5(
+        prompt_text,
+        content='user_prompts',
+        content_rowid='id'
+      );
+    `);
+    this.db.run(`
+      CREATE TRIGGER user_prompts_ai AFTER INSERT ON user_prompts BEGIN
+        INSERT INTO user_prompts_fts(rowid, prompt_text)
+        VALUES (new.id, new.prompt_text);
+      END;
+
+      CREATE TRIGGER user_prompts_ad AFTER DELETE ON user_prompts BEGIN
+        INSERT INTO user_prompts_fts(user_prompts_fts, rowid, prompt_text)
+        VALUES('delete', old.id, old.prompt_text);
+      END;
+
+      CREATE TRIGGER user_prompts_au AFTER UPDATE ON user_prompts BEGIN
+        INSERT INTO user_prompts_fts(user_prompts_fts, rowid, prompt_text)
+        VALUES('delete', old.id, old.prompt_text);
+        INSERT INTO user_prompts_fts(rowid, prompt_text)
+        VALUES (new.id, new.prompt_text);
+      END;
+    `);
+    this.db.run("COMMIT");
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(10, (/* @__PURE__ */ new Date()).toISOString());
+    logger.debug("DB", "Successfully created user_prompts table with FTS5 support");
+  }
+  /**
+   * Ensure discovery_tokens column exists (migration 11)
+   * CRITICAL: This migration was incorrectly using version 7 (which was already taken by removeSessionSummariesUniqueConstraint)
+   * The duplicate version number may have caused migration tracking issues in some databases
+   */
+  ensureDiscoveryTokensColumn() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(11);
+    if (applied) return;
+    const observationsInfo = this.db.query("PRAGMA table_info(observations)").all();
+    const obsHasDiscoveryTokens = observationsInfo.some((col) => col.name === "discovery_tokens");
+    if (!obsHasDiscoveryTokens) {
+      this.db.run("ALTER TABLE observations ADD COLUMN discovery_tokens INTEGER DEFAULT 0");
+      logger.debug("DB", "Added discovery_tokens column to observations table");
+    }
+    const summariesInfo = this.db.query("PRAGMA table_info(session_summaries)").all();
+    const sumHasDiscoveryTokens = summariesInfo.some((col) => col.name === "discovery_tokens");
+    if (!sumHasDiscoveryTokens) {
+      this.db.run("ALTER TABLE session_summaries ADD COLUMN discovery_tokens INTEGER DEFAULT 0");
+      logger.debug("DB", "Added discovery_tokens column to session_summaries table");
+    }
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(11, (/* @__PURE__ */ new Date()).toISOString());
+  }
+  /**
+   * Create pending_messages table for persistent work queue (migration 16)
+   * Messages are persisted before processing and deleted after success.
+   * Enables recovery from SDK hangs and worker crashes.
+   */
+  createPendingMessagesTable() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(16);
+    if (applied) return;
+    const tables = this.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='pending_messages'").all();
+    if (tables.length > 0) {
+      this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(16, (/* @__PURE__ */ new Date()).toISOString());
+      return;
+    }
+    logger.debug("DB", "Creating pending_messages table");
+    this.db.run(`
+      CREATE TABLE pending_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_db_id INTEGER NOT NULL,
+        content_session_id TEXT NOT NULL,
+        message_type TEXT NOT NULL CHECK(message_type IN ('observation', 'summarize')),
+        tool_name TEXT,
+        tool_input TEXT,
+        tool_response TEXT,
+        cwd TEXT,
+        last_user_message TEXT,
+        last_assistant_message TEXT,
+        prompt_number INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'processed', 'failed')),
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        created_at_epoch INTEGER NOT NULL,
+        started_processing_at_epoch INTEGER,
+        completed_at_epoch INTEGER,
+        FOREIGN KEY (session_db_id) REFERENCES sdk_sessions(id) ON DELETE CASCADE
+      )
+    `);
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_pending_messages_session ON pending_messages(session_db_id)");
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_pending_messages_status ON pending_messages(status)");
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_pending_messages_claude_session ON pending_messages(content_session_id)");
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(16, (/* @__PURE__ */ new Date()).toISOString());
+    logger.debug("DB", "pending_messages table created successfully");
+  }
+  /**
+   * Rename session ID columns for semantic clarity (migration 17)
+   * - claude_session_id -> content_session_id (user's observed session)
+   * - sdk_session_id -> memory_session_id (memory agent's session for resume)
+   *
+   * IDEMPOTENT: Checks each table individually before renaming.
+   * This handles databases in any intermediate state (partial migration, fresh install, etc.)
+   */
+  renameSessionIdColumns() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(17);
+    if (applied) return;
+    logger.debug("DB", "Checking session ID columns for semantic clarity rename");
+    let renamesPerformed = 0;
+    const safeRenameColumn = (table, oldCol, newCol) => {
+      const tableInfo = this.db.query(`PRAGMA table_info(${table})`).all();
+      const hasOldCol = tableInfo.some((col) => col.name === oldCol);
+      const hasNewCol = tableInfo.some((col) => col.name === newCol);
+      if (hasNewCol) {
+        return false;
+      }
+      if (hasOldCol) {
+        this.db.run(`ALTER TABLE ${table} RENAME COLUMN ${oldCol} TO ${newCol}`);
+        logger.debug("DB", `Renamed ${table}.${oldCol} to ${newCol}`);
+        return true;
+      }
+      logger.warn("DB", `Column ${oldCol} not found in ${table}, skipping rename`);
+      return false;
+    };
+    if (safeRenameColumn("sdk_sessions", "claude_session_id", "content_session_id")) renamesPerformed++;
+    if (safeRenameColumn("sdk_sessions", "sdk_session_id", "memory_session_id")) renamesPerformed++;
+    if (safeRenameColumn("pending_messages", "claude_session_id", "content_session_id")) renamesPerformed++;
+    if (safeRenameColumn("observations", "sdk_session_id", "memory_session_id")) renamesPerformed++;
+    if (safeRenameColumn("session_summaries", "sdk_session_id", "memory_session_id")) renamesPerformed++;
+    if (safeRenameColumn("user_prompts", "claude_session_id", "content_session_id")) renamesPerformed++;
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(17, (/* @__PURE__ */ new Date()).toISOString());
+    if (renamesPerformed > 0) {
+      logger.debug("DB", `Successfully renamed ${renamesPerformed} session ID columns`);
+    } else {
+      logger.debug("DB", "No session ID column renames needed (already up to date)");
+    }
+  }
+  /**
+   * Repair session ID column renames (migration 19)
+   * DEPRECATED: Migration 17 is now fully idempotent and handles all cases.
+   * This migration is kept for backwards compatibility but does nothing.
+   */
+  repairSessionIdColumnRename() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(19);
+    if (applied) return;
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(19, (/* @__PURE__ */ new Date()).toISOString());
+  }
+  /**
+   * Add failed_at_epoch column to pending_messages (migration 20)
+   * Used by markSessionMessagesFailed() for error recovery tracking
+   */
+  addFailedAtEpochColumn() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(20);
+    if (applied) return;
+    const tableInfo = this.db.query("PRAGMA table_info(pending_messages)").all();
+    const hasColumn = tableInfo.some((col) => col.name === "failed_at_epoch");
+    if (!hasColumn) {
+      this.db.run("ALTER TABLE pending_messages ADD COLUMN failed_at_epoch INTEGER");
+      logger.debug("DB", "Added failed_at_epoch column to pending_messages table");
+    }
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(20, (/* @__PURE__ */ new Date()).toISOString());
+  }
+  /**
+   * Create raw_observations table for direct hook storage (migration 21)
+   * Stores raw tool data directly from hooks — no AI processing, no subprocess spawning.
+   * FTS5 index on tool_name and tool_input only (tool_response is too large for FTS).
+   */
+  addRawObservationsTable() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(21);
+    if (applied) return;
+    const tables = this.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='raw_observations'").all();
+    if (tables.length > 0) {
+      this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(21, (/* @__PURE__ */ new Date()).toISOString());
+      return;
+    }
+    logger.debug("DB", "Creating raw_observations table");
+    this.db.run("BEGIN TRANSACTION");
+    this.db.run(`
+      CREATE TABLE raw_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT NOT NULL,
+        project TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        tool_input TEXT,
+        tool_response TEXT,
+        cwd TEXT,
+        prompt_number INTEGER,
+        created_at TEXT NOT NULL,
+        created_at_epoch INTEGER NOT NULL
+      )
+    `);
+    this.db.run("CREATE INDEX idx_raw_obs_session ON raw_observations(content_session_id)");
+    this.db.run("CREATE INDEX idx_raw_obs_project ON raw_observations(project)");
+    this.db.run("CREATE INDEX idx_raw_obs_tool ON raw_observations(tool_name)");
+    this.db.run("CREATE INDEX idx_raw_obs_created ON raw_observations(created_at_epoch DESC)");
+    this.db.run(`
+      CREATE VIRTUAL TABLE raw_observations_fts USING fts5(
+        tool_name,
+        tool_input,
+        content='raw_observations',
+        content_rowid='id'
+      )
+    `);
+    this.db.run(`
+      CREATE TRIGGER raw_obs_ai AFTER INSERT ON raw_observations BEGIN
+        INSERT INTO raw_observations_fts(rowid, tool_name, tool_input)
+        VALUES (new.id, new.tool_name, new.tool_input);
+      END;
+
+      CREATE TRIGGER raw_obs_ad AFTER DELETE ON raw_observations BEGIN
+        INSERT INTO raw_observations_fts(raw_observations_fts, rowid, tool_name, tool_input)
+        VALUES('delete', old.id, old.tool_name, old.tool_input);
+      END;
+
+      CREATE TRIGGER raw_obs_au AFTER UPDATE ON raw_observations BEGIN
+        INSERT INTO raw_observations_fts(raw_observations_fts, rowid, tool_name, tool_input)
+        VALUES('delete', old.id, old.tool_name, old.tool_input);
+        INSERT INTO raw_observations_fts(rowid, tool_name, tool_input)
+        VALUES (new.id, new.tool_name, new.tool_input);
+      END;
+    `);
+    this.db.run("COMMIT");
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(21, (/* @__PURE__ */ new Date()).toISOString());
+    logger.debug("DB", "raw_observations table created successfully");
+  }
+};
+
+// src/services/sqlite/DirectDB.ts
+function openDatabase(dbPath = DB_PATH) {
+  if (dbPath !== ":memory:") {
+    ensureDir(DATA_DIR);
+  }
+  const db = new Database(dbPath, { create: true, readwrite: true });
+  db.run("PRAGMA journal_mode = WAL");
+  db.run("PRAGMA busy_timeout = 5000");
+  db.run("PRAGMA synchronous = NORMAL");
+  db.run("PRAGMA foreign_keys = ON");
+  db.run("PRAGMA temp_store = memory");
+  const migrationRunner = new MigrationRunner(db);
+  migrationRunner.runAllMigrations();
+  return db;
+}
+
+// src/utils/project-name.ts
+import path from "path";
+function getProjectName(cwd) {
+  if (!cwd || cwd.trim() === "") {
+    logger.warn("PROJECT_NAME", "Empty cwd provided, using fallback", { cwd });
+    return "unknown-project";
+  }
+  const basename3 = path.basename(cwd);
+  if (basename3 === "") {
+    logger.warn("PROJECT_NAME", "Root directory detected, using fallback", { cwd });
+    return "unknown-project";
+  }
+  return basename3;
+}
+function getProjectContext(cwd) {
+  const primary = getProjectName(cwd);
+  return { primary, allProjects: [primary] };
+}
+
+// src/cli/handlers/context.ts
+var MAX_CONTEXT_CHARS = 16e3;
+function formatObservation(obs) {
+  const tool = obs.tool_name;
+  let input = obs.tool_input;
+  try {
+    input = JSON.parse(input ?? "");
+  } catch {
+  }
+  switch (tool) {
+    case "Write":
+    case "Read":
+    case "Edit":
+      return `${tool}: ${input?.file_path ?? input ?? "(unknown)"}`;
+    case "Bash": {
+      const cmd = input?.command ?? input ?? "";
+      const cmdStr = typeof cmd === "string" ? cmd : JSON.stringify(cmd);
+      return `Bash: ${cmdStr.slice(0, 200)}`;
+    }
+    case "Glob":
+      return `Glob: ${input?.pattern ?? input ?? ""}`;
+    case "Grep":
+      return `Grep: ${input?.pattern ?? input ?? ""}`;
+    case "Task":
+      return `Task: ${input?.description ?? input?.subagent_type ?? "(agent)"}`;
+    default: {
+      const summary = typeof input === "string" ? input.slice(0, 120) : JSON.stringify(input).slice(0, 120);
+      return `${tool}: ${summary}`;
+    }
+  }
+}
+var contextHandler = {
+  async execute(input) {
+    const cwd = input.cwd ?? process.cwd();
+    const context = getProjectContext(cwd);
+    const db = openDatabase();
+    try {
+      const projects = context.allProjects;
+      const placeholders = projects.map(() => "?").join(",");
+      const sessions = db.prepare(
+        `SELECT content_session_id, project, status, started_at
+         FROM sdk_sessions
+         WHERE project IN (${placeholders})
+         ORDER BY started_at_epoch DESC
+         LIMIT 5`
+      ).all(...projects);
+      if (sessions.length === 0) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: "SessionStart",
+            additionalContext: ""
+          }
+        };
+      }
+      const sessionIds = sessions.map((s) => s.content_session_id);
+      const sessionPlaceholders = sessionIds.map(() => "?").join(",");
+      const observations = db.prepare(
+        `SELECT id, content_session_id, tool_name, tool_input, tool_response, cwd, prompt_number, created_at, created_at_epoch
+         FROM raw_observations
+         WHERE content_session_id IN (${sessionPlaceholders})
+         ORDER BY created_at_epoch DESC
+         LIMIT 50`
+      ).all(...sessionIds);
+      const prompts = db.prepare(
+        `SELECT content_session_id, prompt_number, prompt_text, created_at
+         FROM user_prompts
+         WHERE content_session_id IN (${sessionPlaceholders})
+         ORDER BY created_at_epoch DESC
+         LIMIT 20`
+      ).all(...sessionIds);
+      const sessionMap = /* @__PURE__ */ new Map();
+      for (const s of sessions) {
+        sessionMap.set(s.content_session_id, { prompts: [], observations: [] });
+      }
+      for (const p of prompts) {
+        sessionMap.get(p.content_session_id)?.prompts.push(p);
+      }
+      for (const o of observations) {
+        sessionMap.get(o.content_session_id)?.observations.push(o);
+      }
+      let lines = [];
+      lines.push("# Recent Session Activity\n");
+      let charBudget = MAX_CONTEXT_CHARS;
+      const sessionBudgets = sessions.map((_, i) => i === 0 ? 0.6 : 0.4 / (sessions.length - 1 || 1));
+      for (let i = 0; i < sessions.length && charBudget > 500; i++) {
+        const s = sessions[i];
+        const data = sessionMap.get(s.content_session_id);
+        if (!data) continue;
+        const budget = Math.floor(MAX_CONTEXT_CHARS * sessionBudgets[i]);
+        let used = 0;
+        const statusTag = s.status === "completed" ? " (completed)" : "";
+        const header = `## Session: ${s.project}${statusTag} - ${s.started_at}
+`;
+        lines.push(header);
+        used += header.length;
+        for (const p of data.prompts.slice(0, 3)) {
+          if (used > budget) break;
+          const line = `- Prompt #${p.prompt_number}: ${p.prompt_text.slice(0, 200)}
+`;
+          lines.push(line);
+          used += line.length;
+        }
+        if (data.observations.length > 0) {
+          lines.push("### Tool Activity:\n");
+          used += 20;
+          for (const obs of data.observations) {
+            if (used > budget) break;
+            const line = `- ${formatObservation(obs)}
+`;
+            lines.push(line);
+            used += line.length;
+          }
+        }
+        lines.push("");
+        charBudget -= used;
+      }
+      const additionalContext = lines.join("").trim();
+      logger.debug("HOOK", "Context generated", {
+        sessions: sessions.length,
+        observations: observations.length,
+        prompts: prompts.length,
+        contextLength: additionalContext.length
+      });
+      return {
+        hookSpecificOutput: {
+          hookEventName: "SessionStart",
+          additionalContext
+        }
+      };
+    } finally {
+      db.close();
+    }
+  }
+};
+
+// src/cli/handlers/session-init.ts
+var sessionInitHandler = {
+  async execute(input) {
+    const { sessionId, cwd, prompt } = input;
+    if (!prompt) {
+      throw new Error("sessionInitHandler requires prompt");
+    }
+    const project = getProjectName(cwd);
+    const now = /* @__PURE__ */ new Date();
+    const nowIso = now.toISOString();
+    const nowEpoch = Math.floor(now.getTime() / 1e3);
+    const db = openDatabase();
+    try {
+      const initSession = db.transaction(() => {
+        db.run(
+          `INSERT OR IGNORE INTO sdk_sessions (content_session_id, project, started_at, started_at_epoch, status, prompt_counter)
+           VALUES (?, ?, ?, ?, 'active', 0)`,
+          [sessionId, project, nowIso, nowEpoch]
+        );
+        db.run(
+          "UPDATE sdk_sessions SET prompt_counter = prompt_counter + 1 WHERE content_session_id = ?",
+          [sessionId]
+        );
+        const session = db.prepare(
+          "SELECT id, prompt_counter FROM sdk_sessions WHERE content_session_id = ?"
+        ).get(sessionId);
+        const promptNumber = session.prompt_counter;
+        db.run(
+          `INSERT INTO user_prompts (content_session_id, prompt_number, prompt_text, created_at, created_at_epoch)
+           VALUES (?, ?, ?, ?, ?)`,
+          [sessionId, promptNumber, prompt, nowIso, nowEpoch]
+        );
+        return { sessionDbId: session.id, promptNumber };
+      });
+      const result = initSession();
+      logger.debug("HOOK", `session-init: prompt #${result.promptNumber} stored`, {
+        sessionId: result.sessionDbId
+      });
+    } finally {
+      db.close();
+    }
+    return { continue: true, suppressOutput: true };
+  }
+};
+
+// src/cli/handlers/observation.ts
+var MAX_RESPONSE_BYTES = 1e4;
+var MAX_INPUT_BYTES = 1e4;
+var MAX_DB_PAGES = 2621440;
+var CLEANUP_PROBABILITY = 0.01;
+var CLEANUP_BATCH_PERCENT = 0.1;
+function truncateStr(s, maxLen) {
+  if (s == null) return null;
+  if (s.length <= maxLen) return s;
+  return s.slice(0, maxLen) + "...[truncated at " + maxLen + " chars]";
+}
+function stringify(val) {
+  if (val == null) return null;
+  if (typeof val === "string") return val;
+  return JSON.stringify(val);
+}
+var observationHandler = {
+  async execute(input) {
+    const { sessionId, cwd, toolName, toolInput, toolResponse } = input;
+    if (!toolName) {
+      throw new Error("observationHandler requires toolName");
+    }
+    if (!cwd) {
+      throw new Error(`Missing cwd in PostToolUse hook input for session ${sessionId}, tool ${toolName}`);
+    }
+    const project = getProjectName(cwd);
+    const now = /* @__PURE__ */ new Date();
+    const nowEpoch = Math.floor(now.getTime() / 1e3);
+    const db = openDatabase();
+    try {
+      db.run(
+        `INSERT OR IGNORE INTO sdk_sessions (content_session_id, project, started_at, started_at_epoch, status)
+         VALUES (?, ?, ?, ?, 'active')`,
+        [sessionId, project, now.toISOString(), nowEpoch]
+      );
+      const session = db.prepare(
+        "SELECT prompt_counter FROM sdk_sessions WHERE content_session_id = ?"
+      ).get(sessionId);
+      const promptNumber = session?.prompt_counter ?? 0;
+      const inputStr = truncateStr(stringify(toolInput), MAX_INPUT_BYTES);
+      const responseStr = truncateStr(stringify(toolResponse), MAX_RESPONSE_BYTES);
+      db.run(
+        `INSERT INTO raw_observations (content_session_id, project, tool_name, tool_input, tool_response, cwd, prompt_number, created_at, created_at_epoch)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [sessionId, project, toolName, inputStr, responseStr, cwd, promptNumber, now.toISOString(), nowEpoch]
+      );
+      if (Math.random() < CLEANUP_PROBABILITY) {
+        const pageCount = db.prepare("PRAGMA page_count").get()?.page_count ?? 0;
+        if (pageCount > MAX_DB_PAGES) {
+          const totalRows = db.prepare("SELECT COUNT(*) as cnt FROM raw_observations").get()?.cnt ?? 0;
+          const deleteCount = Math.max(100, Math.floor(totalRows * CLEANUP_BATCH_PERCENT));
+          const deleted = db.run(
+            `DELETE FROM raw_observations WHERE id IN (
+              SELECT id FROM raw_observations ORDER BY created_at_epoch ASC LIMIT ?
+            )`,
+            [deleteCount]
+          );
+          if (deleted.changes > 0) {
+            logger.info("HOOK", `Size cleanup: deleted ${deleted.changes} oldest observations (DB was ${Math.round(pageCount * 4096 / 1024 / 1024)}MB, limit 10GB)`);
+          }
+        }
+      }
+      logger.debug("HOOK", "Raw observation stored", { toolName });
+    } finally {
+      db.close();
+    }
+    return { continue: true, suppressOutput: true };
+  }
+};
+
+// src/cli/handlers/summarize.ts
+var summarizeHandler = {
+  async execute(_input) {
+    return { continue: true, suppressOutput: true };
+  }
+};
+
+// src/cli/handlers/user-message.ts
+import { basename as basename2 } from "path";
+
+// src/shared/worker-utils.ts
+import path2 from "path";
+import { homedir as homedir4 } from "os";
+import { readFileSync as readFileSync3 } from "fs";
+
 // src/shared/hook-constants.ts
 var HOOK_TIMEOUTS = {
   DEFAULT: 3e5,
@@ -415,144 +1405,6 @@ var HOOK_EXIT_CODES = {
 function getTimeout(baseTimeout) {
   return process.platform === "win32" ? Math.round(baseTimeout * HOOK_TIMEOUTS.WINDOWS_MULTIPLIER) : baseTimeout;
 }
-
-// src/shared/SettingsDefaultsManager.ts
-import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync2, mkdirSync as mkdirSync2 } from "fs";
-import { join as join2, dirname } from "path";
-import { homedir as homedir2 } from "os";
-
-// src/constants/observation-metadata.ts
-var DEFAULT_OBSERVATION_TYPES_STRING = "bugfix,feature,refactor,discovery,decision,change";
-var DEFAULT_OBSERVATION_CONCEPTS_STRING = "how-it-works,why-it-exists,what-changed,problem-solution,gotcha,pattern,trade-off";
-
-// src/shared/SettingsDefaultsManager.ts
-var SettingsDefaultsManager = class {
-  /**
-   * Default values for all settings
-   */
-  static DEFAULTS = {
-    CLAUDE_RECALL_MODEL: "claude-sonnet-4-5",
-    CLAUDE_RECALL_CONTEXT_OBSERVATIONS: "50",
-    CLAUDE_RECALL_WORKER_PORT: "37777",
-    CLAUDE_RECALL_WORKER_HOST: "127.0.0.1",
-    CLAUDE_RECALL_SKIP_TOOLS: "ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion",
-    // AI Provider Configuration
-    CLAUDE_RECALL_PROVIDER: "claude",
-    // Default to Claude
-    CLAUDE_RECALL_GEMINI_API_KEY: "",
-    // Empty by default, can be set via UI or env
-    CLAUDE_RECALL_GEMINI_MODEL: "gemini-2.5-flash-lite",
-    // Default Gemini model (highest free tier RPM)
-    CLAUDE_RECALL_GEMINI_RATE_LIMITING_ENABLED: "true",
-    // Rate limiting ON by default for free tier users
-    CLAUDE_RECALL_OPENROUTER_API_KEY: "",
-    // Empty by default, can be set via UI or env
-    CLAUDE_RECALL_OPENROUTER_MODEL: "xiaomi/mimo-v2-flash:free",
-    // Default OpenRouter model (free tier)
-    CLAUDE_RECALL_OPENROUTER_SITE_URL: "",
-    // Optional: for OpenRouter analytics
-    CLAUDE_RECALL_OPENROUTER_APP_NAME: "claude-recall",
-    // App name for OpenRouter analytics
-    CLAUDE_RECALL_OPENROUTER_MAX_CONTEXT_MESSAGES: "20",
-    // Max messages in context window
-    CLAUDE_RECALL_OPENROUTER_MAX_TOKENS: "100000",
-    // Max estimated tokens (~100k safety limit)
-    // System Configuration
-    CLAUDE_RECALL_DATA_DIR: join2(homedir2(), ".claude-recall"),
-    CLAUDE_RECALL_LOG_LEVEL: "INFO",
-    CLAUDE_RECALL_PYTHON_VERSION: "3.13",
-    CLAUDE_CODE_PATH: "",
-    // Empty means auto-detect via 'which claude'
-    CLAUDE_RECALL_MODE: "code",
-    // Default mode profile
-    // Token Economics
-    CLAUDE_RECALL_CONTEXT_SHOW_READ_TOKENS: "true",
-    CLAUDE_RECALL_CONTEXT_SHOW_WORK_TOKENS: "true",
-    CLAUDE_RECALL_CONTEXT_SHOW_SAVINGS_AMOUNT: "true",
-    CLAUDE_RECALL_CONTEXT_SHOW_SAVINGS_PERCENT: "true",
-    // Observation Filtering
-    CLAUDE_RECALL_CONTEXT_OBSERVATION_TYPES: DEFAULT_OBSERVATION_TYPES_STRING,
-    CLAUDE_RECALL_CONTEXT_OBSERVATION_CONCEPTS: DEFAULT_OBSERVATION_CONCEPTS_STRING,
-    // Display Configuration
-    CLAUDE_RECALL_CONTEXT_FULL_COUNT: "5",
-    CLAUDE_RECALL_CONTEXT_FULL_FIELD: "narrative",
-    CLAUDE_RECALL_CONTEXT_SESSION_COUNT: "10",
-    // Feature Toggles
-    CLAUDE_RECALL_CONTEXT_SHOW_LAST_SUMMARY: "true",
-    CLAUDE_RECALL_CONTEXT_SHOW_LAST_MESSAGE: "false"
-  };
-  /**
-   * Get all defaults as an object
-   */
-  static getAllDefaults() {
-    return { ...this.DEFAULTS };
-  }
-  /**
-   * Get a default value from defaults (no environment variable override)
-   */
-  static get(key) {
-    return this.DEFAULTS[key];
-  }
-  /**
-   * Get an integer default value
-   */
-  static getInt(key) {
-    const value = this.get(key);
-    return parseInt(value, 10);
-  }
-  /**
-   * Get a boolean default value
-   */
-  static getBool(key) {
-    const value = this.get(key);
-    return value === "true";
-  }
-  /**
-   * Load settings from file with fallback to defaults
-   * Returns merged settings with defaults as fallback
-   * Handles all errors (missing file, corrupted JSON, permissions) by returning defaults
-   */
-  static loadFromFile(settingsPath) {
-    try {
-      if (!existsSync2(settingsPath)) {
-        const defaults = this.getAllDefaults();
-        try {
-          const dir = dirname(settingsPath);
-          if (!existsSync2(dir)) {
-            mkdirSync2(dir, { recursive: true });
-          }
-          writeFileSync(settingsPath, JSON.stringify(defaults, null, 2), "utf-8");
-          console.log("[SETTINGS] Created settings file with defaults:", settingsPath);
-        } catch (error) {
-          console.warn("[SETTINGS] Failed to create settings file, using in-memory defaults:", settingsPath, error);
-        }
-        return defaults;
-      }
-      const settingsData = readFileSync2(settingsPath, "utf-8");
-      const settings = JSON.parse(settingsData);
-      let flatSettings = settings;
-      if (settings.env && typeof settings.env === "object") {
-        flatSettings = settings.env;
-        try {
-          writeFileSync(settingsPath, JSON.stringify(flatSettings, null, 2), "utf-8");
-          console.log("[SETTINGS] Migrated settings file from nested to flat schema:", settingsPath);
-        } catch (error) {
-          console.warn("[SETTINGS] Failed to auto-migrate settings file:", settingsPath, error);
-        }
-      }
-      const result = { ...this.DEFAULTS };
-      for (const key of Object.keys(this.DEFAULTS)) {
-        if (flatSettings[key] !== void 0) {
-          result[key] = flatSettings[key];
-        }
-      }
-      return result;
-    } catch (error) {
-      console.warn("[SETTINGS] Failed to load settings, using defaults:", settingsPath, error);
-      return this.getAllDefaults();
-    }
-  }
-};
 
 // src/utils/error-messages.ts
 function getWorkerRestartInstructions(options = {}) {
@@ -588,14 +1440,14 @@ ${message}`;
 }
 
 // src/shared/worker-utils.ts
-var MARKETPLACE_ROOT = path.join(homedir3(), ".claude", "plugins", "marketplaces", "askqai");
+var MARKETPLACE_ROOT = path2.join(homedir4(), ".claude", "plugins", "marketplaces", "askqai");
 var HEALTH_CHECK_TIMEOUT_MS = getTimeout(HOOK_TIMEOUTS.HEALTH_CHECK);
 var cachedPort = null;
 function getWorkerPort() {
   if (cachedPort !== null) {
     return cachedPort;
   }
-  const settingsPath = path.join(SettingsDefaultsManager.get("CLAUDE_RECALL_DATA_DIR"), "settings.json");
+  const settingsPath = path2.join(SettingsDefaultsManager.get("CLAUDE_RECALL_DATA_DIR"), "settings.json");
   const settings = SettingsDefaultsManager.loadFromFile(settingsPath);
   cachedPort = parseInt(settings.CLAUDE_RECALL_WORKER_PORT, 10);
   return cachedPort;
@@ -606,7 +1458,7 @@ async function isWorkerHealthy() {
   return response.ok;
 }
 function getPluginVersion() {
-  const packageJsonPath = path.join(MARKETPLACE_ROOT, "package.json");
+  const packageJsonPath = path2.join(MARKETPLACE_ROOT, "package.json");
   const packageJson = JSON.parse(readFileSync3(packageJsonPath, "utf-8"));
   return packageJson.version;
 }
@@ -654,333 +1506,12 @@ async function ensureWorkerRunning() {
   }));
 }
 
-// src/utils/project-name.ts
-import path3 from "path";
-
-// src/utils/worktree.ts
-import { statSync, readFileSync as readFileSync4 } from "fs";
-import path2 from "path";
-var NOT_A_WORKTREE = {
-  isWorktree: false,
-  worktreeName: null,
-  parentRepoPath: null,
-  parentProjectName: null
-};
-function detectWorktree(cwd) {
-  const gitPath = path2.join(cwd, ".git");
-  let stat;
-  try {
-    stat = statSync(gitPath);
-  } catch {
-    return NOT_A_WORKTREE;
-  }
-  if (!stat.isFile()) {
-    return NOT_A_WORKTREE;
-  }
-  let content;
-  try {
-    content = readFileSync4(gitPath, "utf-8").trim();
-  } catch {
-    return NOT_A_WORKTREE;
-  }
-  const match = content.match(/^gitdir:\s*(.+)$/);
-  if (!match) {
-    return NOT_A_WORKTREE;
-  }
-  const gitdirPath = match[1];
-  const worktreesMatch = gitdirPath.match(/^(.+)[/\\]\.git[/\\]worktrees[/\\]([^/\\]+)$/);
-  if (!worktreesMatch) {
-    return NOT_A_WORKTREE;
-  }
-  const parentRepoPath = worktreesMatch[1];
-  const worktreeName = path2.basename(cwd);
-  const parentProjectName = path2.basename(parentRepoPath);
-  return {
-    isWorktree: true,
-    worktreeName,
-    parentRepoPath,
-    parentProjectName
-  };
-}
-
-// src/utils/project-name.ts
-function getProjectName(cwd) {
-  if (!cwd || cwd.trim() === "") {
-    logger.warn("PROJECT_NAME", "Empty cwd provided, using fallback", { cwd });
-    return "unknown-project";
-  }
-  const basename2 = path3.basename(cwd);
-  if (basename2 === "") {
-    const isWindows = process.platform === "win32";
-    if (isWindows) {
-      const driveMatch = cwd.match(/^([A-Z]):\\/i);
-      if (driveMatch) {
-        const driveLetter = driveMatch[1].toUpperCase();
-        const projectName = `drive-${driveLetter}`;
-        logger.info("PROJECT_NAME", "Drive root detected", { cwd, projectName });
-        return projectName;
-      }
-    }
-    logger.warn("PROJECT_NAME", "Root directory detected, using fallback", { cwd });
-    return "unknown-project";
-  }
-  return basename2;
-}
-function getProjectContext(cwd) {
-  const primary = getProjectName(cwd);
-  if (!cwd) {
-    return { primary, parent: null, isWorktree: false, allProjects: [primary] };
-  }
-  const worktreeInfo = detectWorktree(cwd);
-  if (worktreeInfo.isWorktree && worktreeInfo.parentProjectName) {
-    return {
-      primary,
-      parent: worktreeInfo.parentProjectName,
-      isWorktree: true,
-      allProjects: [worktreeInfo.parentProjectName, primary]
-    };
-  }
-  return { primary, parent: null, isWorktree: false, allProjects: [primary] };
-}
-
-// src/cli/handlers/context.ts
-var contextHandler = {
-  async execute(input) {
-    await ensureWorkerRunning();
-    const cwd = input.cwd ?? process.cwd();
-    const context = getProjectContext(cwd);
-    const port = getWorkerPort();
-    const projectsParam = context.allProjects.join(",");
-    const url = `http://127.0.0.1:${port}/api/context/inject?projects=${encodeURIComponent(projectsParam)}`;
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`Context generation failed: ${response.status}`);
-    }
-    const result = await response.text();
-    const additionalContext = result.trim();
-    return {
-      hookSpecificOutput: {
-        hookEventName: "SessionStart",
-        additionalContext
-      }
-    };
-  }
-};
-
-// src/cli/handlers/session-init.ts
-async function queryRAGContext(port, prompt, project, tokenBudget = 2e3) {
-  try {
-    const response = await fetch(`http://127.0.0.1:${port}/api/rag/query`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: prompt,
-        project,
-        limit: 5,
-        tokenBudget
-      })
-    });
-    if (!response.ok) {
-      logger.debug("HOOK", "RAG query failed with status", { status: response.status });
-      return { context: "", stats: { observationCount: 0, summaryCount: 0, queryTimeMs: 0, hotTierHit: false, available: false } };
-    }
-    const result = await response.json();
-    return { context: result.context, stats: result.stats };
-  } catch (err) {
-    logger.debug("HOOK", "RAG query error", { error: err instanceof Error ? err.message : String(err) });
-    return { context: "", stats: { observationCount: 0, summaryCount: 0, queryTimeMs: 0, hotTierHit: false, available: false } };
-  }
-}
-var sessionInitHandler = {
-  async execute(input) {
-    await ensureWorkerRunning();
-    const { sessionId, cwd, prompt } = input;
-    if (!prompt) {
-      throw new Error("sessionInitHandler requires prompt");
-    }
-    const project = getProjectName(cwd);
-    const port = getWorkerPort();
-    logger.debug("HOOK", "session-init: Calling /api/sessions/init", { contentSessionId: sessionId, project });
-    const initResponse = await fetch(`http://127.0.0.1:${port}/api/sessions/init`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contentSessionId: sessionId,
-        project,
-        prompt
-      })
-      // Note: Removed signal to avoid Windows Bun cleanup issue (libuv assertion)
-    });
-    if (!initResponse.ok) {
-      throw new Error(`Session initialization failed: ${initResponse.status}`);
-    }
-    const initResult = await initResponse.json();
-    const sessionDbId = initResult.sessionDbId;
-    const promptNumber = initResult.promptNumber;
-    logger.debug("HOOK", "session-init: Received from /api/sessions/init", { sessionDbId, promptNumber, skipped: initResult.skipped });
-    logger.debug("HOOK", `[ALIGNMENT] Hook Entry | contentSessionId=${sessionId} | prompt#=${promptNumber} | sessionDbId=${sessionDbId}`);
-    if (initResult.skipped && initResult.reason === "private") {
-      logger.info("HOOK", `INIT_COMPLETE | sessionDbId=${sessionDbId} | promptNumber=${promptNumber} | skipped=true | reason=private`, {
-        sessionId: sessionDbId
-      });
-      return { continue: true, suppressOutput: true };
-    }
-    if (input.platform !== "cursor" && sessionDbId) {
-      const cleanedPrompt = prompt.startsWith("/") ? prompt.substring(1) : prompt;
-      logger.debug("HOOK", "session-init: Calling /sessions/{sessionDbId}/init", { sessionDbId, promptNumber });
-      const response = await fetch(`http://127.0.0.1:${port}/sessions/${sessionDbId}/init`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userPrompt: cleanedPrompt, promptNumber })
-        // Note: Removed signal to avoid Windows Bun cleanup issue (libuv assertion)
-      });
-      if (!response.ok) {
-        throw new Error(`SDK agent start failed: ${response.status}`);
-      }
-    } else if (input.platform === "cursor") {
-      logger.debug("HOOK", "session-init: Skipping SDK agent init for Cursor platform", { sessionDbId, promptNumber });
-    }
-    logger.info("HOOK", `INIT_COMPLETE | sessionDbId=${sessionDbId} | promptNumber=${promptNumber} | project=${project}`, {
-      sessionId: sessionDbId
-    });
-    const ragResult = await queryRAGContext(port, prompt, project, 2e3);
-    if (ragResult.context && ragResult.context.trim()) {
-      logger.debug("HOOK", "RAG context retrieved", {
-        sessionId: sessionDbId,
-        promptNumber,
-        contextLength: ragResult.context.length,
-        observationCount: ragResult.stats.observationCount,
-        summaryCount: ragResult.stats.summaryCount,
-        queryTimeMs: ragResult.stats.queryTimeMs,
-        hotTierHit: ragResult.stats.hotTierHit
-      });
-      return {
-        continue: true,
-        suppressOutput: true,
-        hookSpecificOutput: {
-          hookEventName: "UserPromptSubmit",
-          additionalContext: ragResult.context
-        }
-      };
-    }
-    return { continue: true, suppressOutput: true };
-  }
-};
-
-// src/cli/handlers/observation.ts
-var observationHandler = {
-  async execute(input) {
-    await ensureWorkerRunning();
-    const { sessionId, cwd, toolName, toolInput, toolResponse } = input;
-    if (!toolName) {
-      throw new Error("observationHandler requires toolName");
-    }
-    const port = getWorkerPort();
-    const toolStr = logger.formatTool(toolName, toolInput);
-    logger.dataIn("HOOK", `PostToolUse: ${toolStr}`, {
-      workerPort: port
-    });
-    if (!cwd) {
-      throw new Error(`Missing cwd in PostToolUse hook input for session ${sessionId}, tool ${toolName}`);
-    }
-    const response = await fetch(`http://127.0.0.1:${port}/api/sessions/observations`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contentSessionId: sessionId,
-        tool_name: toolName,
-        tool_input: toolInput,
-        tool_response: toolResponse,
-        cwd
-      })
-      // Note: Removed signal to avoid Windows Bun cleanup issue (libuv assertion)
-    });
-    if (!response.ok) {
-      throw new Error(`Observation storage failed: ${response.status}`);
-    }
-    logger.debug("HOOK", "Observation sent successfully", { toolName });
-    return { continue: true, suppressOutput: true };
-  }
-};
-
-// src/shared/transcript-parser.ts
-import { readFileSync as readFileSync5, existsSync as existsSync3 } from "fs";
-function extractLastMessage(transcriptPath, role, stripSystemReminders = false) {
-  if (!transcriptPath || !existsSync3(transcriptPath)) {
-    throw new Error(`Transcript path missing or file does not exist: ${transcriptPath}`);
-  }
-  const content = readFileSync5(transcriptPath, "utf-8").trim();
-  if (!content) {
-    throw new Error(`Transcript file exists but is empty: ${transcriptPath}`);
-  }
-  const lines = content.split("\n");
-  let foundMatchingRole = false;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = JSON.parse(lines[i]);
-    if (line.type === role) {
-      foundMatchingRole = true;
-      if (line.message?.content) {
-        let text = "";
-        const msgContent = line.message.content;
-        if (typeof msgContent === "string") {
-          text = msgContent;
-        } else if (Array.isArray(msgContent)) {
-          text = msgContent.filter((c) => c.type === "text").map((c) => c.text).join("\n");
-        } else {
-          throw new Error(`Unknown message content format in transcript. Type: ${typeof msgContent}`);
-        }
-        if (stripSystemReminders) {
-          text = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "");
-          text = text.replace(/\n{3,}/g, "\n\n").trim();
-        }
-        return text;
-      }
-    }
-  }
-  if (!foundMatchingRole) {
-    throw new Error(`No message found for role '${role}' in transcript: ${transcriptPath}`);
-  }
-  return "";
-}
-
-// src/cli/handlers/summarize.ts
-var summarizeHandler = {
-  async execute(input) {
-    await ensureWorkerRunning();
-    const { sessionId, transcriptPath } = input;
-    const port = getWorkerPort();
-    if (!transcriptPath) {
-      throw new Error(`Missing transcriptPath in Stop hook input for session ${sessionId}`);
-    }
-    const lastAssistantMessage = extractLastMessage(transcriptPath, "assistant", true);
-    logger.dataIn("HOOK", "Stop: Requesting summary", {
-      workerPort: port,
-      hasLastAssistantMessage: !!lastAssistantMessage
-    });
-    const response = await fetch(`http://127.0.0.1:${port}/api/sessions/summarize`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contentSessionId: sessionId,
-        last_assistant_message: lastAssistantMessage
-      })
-      // Note: Removed signal to avoid Windows Bun cleanup issue (libuv assertion)
-    });
-    if (!response.ok) {
-      return { continue: true, suppressOutput: true };
-    }
-    logger.debug("HOOK", "Summary request sent successfully");
-    return { continue: true, suppressOutput: true };
-  }
-};
-
 // src/cli/handlers/user-message.ts
-import { basename } from "path";
 var userMessageHandler = {
   async execute(input) {
     await ensureWorkerRunning();
     const port = getWorkerPort();
-    const project = basename(input.cwd ?? process.cwd());
+    const project = basename2(input.cwd ?? process.cwd());
     const response = await fetch(
       `http://127.0.0.1:${port}/api/context/inject?project=${encodeURIComponent(project)}&colors=true`,
       { method: "GET" }
@@ -1037,31 +1568,22 @@ var fileEditHandler = {
 // src/cli/handlers/session-end.ts
 var sessionEndHandler = {
   async execute(input) {
-    await ensureWorkerRunning();
     const { sessionId } = input;
-    const port = getWorkerPort();
-    logger.debug("HOOK", "SessionEnd: Marking session as completed", {
-      contentSessionId: sessionId,
-      workerPort: port
-    });
+    const now = /* @__PURE__ */ new Date();
+    const db = openDatabase();
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/api/sessions/end`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contentSessionId: sessionId
-        })
-      });
-      if (!response.ok) {
-        logger.warn("HOOK", "SessionEnd: Failed to mark session completed", {
-          contentSessionId: sessionId,
-          status: response.status
-        });
-      } else {
-        logger.debug("HOOK", "SessionEnd: Session marked as completed", { contentSessionId: sessionId });
-      }
+      db.run(
+        `UPDATE sdk_sessions SET status = 'completed', completed_at = ?, completed_at_epoch = ?
+         WHERE content_session_id = ? AND status = 'active'`,
+        [now.toISOString(), Math.floor(now.getTime() / 1e3), sessionId]
+      );
+      logger.debug("HOOK", "SessionEnd: Session marked completed", { contentSessionId: sessionId });
     } catch (error) {
-      logger.warn("HOOK", "SessionEnd: Could not reach worker", { contentSessionId: sessionId, error });
+      logger.warn("HOOK", "SessionEnd: Failed to mark session completed", {
+        contentSessionId: sessionId
+      });
+    } finally {
+      db.close();
     }
     return { continue: true, suppressOutput: true };
   }
@@ -1086,13 +1608,13 @@ function getEventHandler(eventType) {
 }
 
 // src/cli/hook-command.ts
-async function hookCommand(platform, event) {
+async function hookCommand(platform2, event2) {
   try {
-    const adapter = getPlatformAdapter(platform);
-    const handler = getEventHandler(event);
+    const adapter = getPlatformAdapter(platform2);
+    const handler = getEventHandler(event2);
     const rawInput = await readJsonFromStdin();
     const input = adapter.normalizeInput(rawInput);
-    input.platform = platform;
+    input.platform = platform2;
     const result = await handler.execute(input);
     const output = adapter.formatOutput(result);
     console.log(JSON.stringify(output));
@@ -1102,6 +1624,14 @@ async function hookCommand(platform, event) {
     process.exit(HOOK_EXIT_CODES.BLOCKING_ERROR);
   }
 }
-export {
-  hookCommand
-};
+
+// src/cli/hook-entry.ts
+var platform = process.argv[2];
+var event = process.argv[3];
+if (!platform || !event) {
+  console.error("Usage: hook-command <platform> <event>");
+  console.error("Platforms: claude-code, cursor, raw");
+  console.error("Events: context, session-init, observation, summarize, session-end, user-message");
+  process.exit(1);
+}
+hookCommand(platform, event);

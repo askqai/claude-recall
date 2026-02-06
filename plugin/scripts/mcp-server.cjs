@@ -3223,8 +3223,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path2) {
-      let input = path2;
+    function removeDotSegments(path) {
+      let input = path;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3423,8 +3423,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path2, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path2 && path2 !== "/" ? path2 : void 0;
+        const [path, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path && path !== "/" ? path : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -7438,8 +7438,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path2, errorMaps, issueData } = params;
-  const fullPath = [...path2, ...issueData.path || []];
+  const { data, path, errorMaps, issueData } = params;
+  const fullPath = [...path, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -7554,11 +7554,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path2, key) {
+  constructor(parent, value, path, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path2;
+    this._path = path;
     this._key = key;
   }
   get path() {
@@ -11202,10 +11202,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path2) {
-  if (!path2)
+function getElementAtPath(obj, path) {
+  if (!path)
     return obj;
-  return path2.reduce((acc, key) => acc?.[key], obj);
+  return path.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -11588,11 +11588,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path2, issues) {
+function prefixIssues(path, issues) {
   return issues.map((iss) => {
     var _a2;
     (_a2 = iss).path ?? (_a2.path = []);
-    iss.path.unshift(path2);
+    iss.path.unshift(path);
     return iss;
   });
 }
@@ -20935,28 +20935,14 @@ var StdioServerTransport = class {
   }
 };
 
-// src/shared/worker-utils.ts
-var import_path3 = __toESM(require("path"), 1);
-var import_os3 = require("os");
+// src/services/sqlite/DirectDB.ts
+var import_bun_sqlite = require("bun:sqlite");
 
-// src/shared/hook-constants.ts
-var HOOK_TIMEOUTS = {
-  DEFAULT: 3e5,
-  // Standard HTTP timeout (5 min for slow systems)
-  HEALTH_CHECK: 3e4,
-  // Worker health check (30s for slow systems)
-  WORKER_STARTUP_WAIT: 1e3,
-  WORKER_STARTUP_RETRIES: 300,
-  PRE_RESTART_SETTLE_DELAY: 2e3,
-  // Give files time to sync before restart
-  POWERSHELL_COMMAND: 1e4,
-  // PowerShell process enumeration (10s - typically completes in <1s)
-  WINDOWS_MULTIPLIER: 1.5
-  // Platform-specific adjustment
-};
-function getTimeout(baseTimeout) {
-  return process.platform === "win32" ? Math.round(baseTimeout * HOOK_TIMEOUTS.WINDOWS_MULTIPLIER) : baseTimeout;
-}
+// src/shared/paths.ts
+var import_path3 = require("path");
+var import_os3 = require("os");
+var import_fs3 = require("fs");
+var import_url = require("url");
 
 // src/shared/SettingsDefaultsManager.ts
 var import_fs2 = require("fs");
@@ -21096,28 +21082,569 @@ var SettingsDefaultsManager = class {
   }
 };
 
-// src/shared/worker-utils.ts
-var MARKETPLACE_ROOT = import_path3.default.join((0, import_os3.homedir)(), ".claude", "plugins", "marketplaces", "askqai");
-var HEALTH_CHECK_TIMEOUT_MS = getTimeout(HOOK_TIMEOUTS.HEALTH_CHECK);
-var cachedPort = null;
-var cachedHost = null;
-function getWorkerPort() {
-  if (cachedPort !== null) {
-    return cachedPort;
+// src/shared/paths.ts
+var import_meta = {};
+function getDirname() {
+  if (typeof __dirname !== "undefined") {
+    return __dirname;
   }
-  const settingsPath = import_path3.default.join(SettingsDefaultsManager.get("CLAUDE_RECALL_DATA_DIR"), "settings.json");
-  const settings = SettingsDefaultsManager.loadFromFile(settingsPath);
-  cachedPort = parseInt(settings.CLAUDE_RECALL_WORKER_PORT, 10);
-  return cachedPort;
+  return (0, import_path3.dirname)((0, import_url.fileURLToPath)(import_meta.url));
 }
-function getWorkerHost() {
-  if (cachedHost !== null) {
-    return cachedHost;
+var _dirname = getDirname();
+var DATA_DIR = SettingsDefaultsManager.get("CLAUDE_RECALL_DATA_DIR");
+var CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || (0, import_path3.join)((0, import_os3.homedir)(), ".claude");
+var ARCHIVES_DIR = (0, import_path3.join)(DATA_DIR, "archives");
+var LOGS_DIR = (0, import_path3.join)(DATA_DIR, "logs");
+var TRASH_DIR = (0, import_path3.join)(DATA_DIR, "trash");
+var BACKUPS_DIR = (0, import_path3.join)(DATA_DIR, "backups");
+var MODES_DIR = (0, import_path3.join)(DATA_DIR, "modes");
+var USER_SETTINGS_PATH = (0, import_path3.join)(DATA_DIR, "settings.json");
+var DB_PATH = (0, import_path3.join)(DATA_DIR, "claude-recall.db");
+var VECTOR_DB_DIR = (0, import_path3.join)(DATA_DIR, "vector-db");
+var CLAUDE_SETTINGS_PATH = (0, import_path3.join)(CLAUDE_CONFIG_DIR, "settings.json");
+var CLAUDE_COMMANDS_DIR = (0, import_path3.join)(CLAUDE_CONFIG_DIR, "commands");
+var CLAUDE_MD_PATH = (0, import_path3.join)(CLAUDE_CONFIG_DIR, "CLAUDE.md");
+function ensureDir(dirPath) {
+  (0, import_fs3.mkdirSync)(dirPath, { recursive: true });
+}
+
+// src/services/sqlite/migrations/runner.ts
+var MigrationRunner = class {
+  constructor(db2) {
+    this.db = db2;
   }
-  const settingsPath = import_path3.default.join(SettingsDefaultsManager.get("CLAUDE_RECALL_DATA_DIR"), "settings.json");
-  const settings = SettingsDefaultsManager.loadFromFile(settingsPath);
-  cachedHost = settings.CLAUDE_RECALL_WORKER_HOST;
-  return cachedHost;
+  /**
+   * Run all migrations in order
+   * This is the only public method - all migrations are internal
+   */
+  runAllMigrations() {
+    this.initializeSchema();
+    this.ensureWorkerPortColumn();
+    this.ensurePromptTrackingColumns();
+    this.removeSessionSummariesUniqueConstraint();
+    this.addObservationHierarchicalFields();
+    this.makeObservationsTextNullable();
+    this.createUserPromptsTable();
+    this.ensureDiscoveryTokensColumn();
+    this.createPendingMessagesTable();
+    this.renameSessionIdColumns();
+    this.repairSessionIdColumnRename();
+    this.addFailedAtEpochColumn();
+    this.addRawObservationsTable();
+  }
+  /**
+   * Initialize database schema using migrations (migration004)
+   * This runs the core SDK tables migration if no tables exist
+   */
+  initializeSchema() {
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS schema_versions (
+        id INTEGER PRIMARY KEY,
+        version INTEGER UNIQUE NOT NULL,
+        applied_at TEXT NOT NULL
+      )
+    `);
+    const appliedVersions = this.db.prepare("SELECT version FROM schema_versions ORDER BY version").all();
+    const maxApplied = appliedVersions.length > 0 ? Math.max(...appliedVersions.map((v) => v.version)) : 0;
+    if (maxApplied === 0) {
+      logger.info("DB", "Initializing fresh database with migration004");
+      this.db.run(`
+        CREATE TABLE IF NOT EXISTS sdk_sessions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          content_session_id TEXT UNIQUE NOT NULL,
+          memory_session_id TEXT UNIQUE,
+          project TEXT NOT NULL,
+          user_prompt TEXT,
+          started_at TEXT NOT NULL,
+          started_at_epoch INTEGER NOT NULL,
+          completed_at TEXT,
+          completed_at_epoch INTEGER,
+          status TEXT CHECK(status IN ('active', 'completed', 'failed')) NOT NULL DEFAULT 'active'
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sdk_sessions_claude_id ON sdk_sessions(content_session_id);
+        CREATE INDEX IF NOT EXISTS idx_sdk_sessions_sdk_id ON sdk_sessions(memory_session_id);
+        CREATE INDEX IF NOT EXISTS idx_sdk_sessions_project ON sdk_sessions(project);
+        CREATE INDEX IF NOT EXISTS idx_sdk_sessions_status ON sdk_sessions(status);
+        CREATE INDEX IF NOT EXISTS idx_sdk_sessions_started ON sdk_sessions(started_at_epoch DESC);
+
+        CREATE TABLE IF NOT EXISTS observations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          memory_session_id TEXT NOT NULL,
+          project TEXT NOT NULL,
+          text TEXT NOT NULL,
+          type TEXT NOT NULL CHECK(type IN ('decision', 'bugfix', 'feature', 'refactor', 'discovery')),
+          created_at TEXT NOT NULL,
+          created_at_epoch INTEGER NOT NULL,
+          FOREIGN KEY(memory_session_id) REFERENCES sdk_sessions(memory_session_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_observations_sdk_session ON observations(memory_session_id);
+        CREATE INDEX IF NOT EXISTS idx_observations_project ON observations(project);
+        CREATE INDEX IF NOT EXISTS idx_observations_type ON observations(type);
+        CREATE INDEX IF NOT EXISTS idx_observations_created ON observations(created_at_epoch DESC);
+
+        CREATE TABLE IF NOT EXISTS session_summaries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          memory_session_id TEXT UNIQUE NOT NULL,
+          project TEXT NOT NULL,
+          request TEXT,
+          investigated TEXT,
+          learned TEXT,
+          completed TEXT,
+          next_steps TEXT,
+          files_read TEXT,
+          files_edited TEXT,
+          notes TEXT,
+          created_at TEXT NOT NULL,
+          created_at_epoch INTEGER NOT NULL,
+          FOREIGN KEY(memory_session_id) REFERENCES sdk_sessions(memory_session_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_session_summaries_sdk_session ON session_summaries(memory_session_id);
+        CREATE INDEX IF NOT EXISTS idx_session_summaries_project ON session_summaries(project);
+        CREATE INDEX IF NOT EXISTS idx_session_summaries_created ON session_summaries(created_at_epoch DESC);
+      `);
+      this.db.prepare("INSERT INTO schema_versions (version, applied_at) VALUES (?, ?)").run(4, (/* @__PURE__ */ new Date()).toISOString());
+      logger.info("DB", "Migration004 applied successfully");
+    }
+  }
+  /**
+   * Ensure worker_port column exists (migration 5)
+   */
+  ensureWorkerPortColumn() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(5);
+    if (applied) return;
+    const tableInfo = this.db.query("PRAGMA table_info(sdk_sessions)").all();
+    const hasWorkerPort = tableInfo.some((col) => col.name === "worker_port");
+    if (!hasWorkerPort) {
+      this.db.run("ALTER TABLE sdk_sessions ADD COLUMN worker_port INTEGER");
+      logger.debug("DB", "Added worker_port column to sdk_sessions table");
+    }
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(5, (/* @__PURE__ */ new Date()).toISOString());
+  }
+  /**
+   * Ensure prompt tracking columns exist (migration 6)
+   */
+  ensurePromptTrackingColumns() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(6);
+    if (applied) return;
+    const sessionsInfo = this.db.query("PRAGMA table_info(sdk_sessions)").all();
+    const hasPromptCounter = sessionsInfo.some((col) => col.name === "prompt_counter");
+    if (!hasPromptCounter) {
+      this.db.run("ALTER TABLE sdk_sessions ADD COLUMN prompt_counter INTEGER DEFAULT 0");
+      logger.debug("DB", "Added prompt_counter column to sdk_sessions table");
+    }
+    const observationsInfo = this.db.query("PRAGMA table_info(observations)").all();
+    const obsHasPromptNumber = observationsInfo.some((col) => col.name === "prompt_number");
+    if (!obsHasPromptNumber) {
+      this.db.run("ALTER TABLE observations ADD COLUMN prompt_number INTEGER");
+      logger.debug("DB", "Added prompt_number column to observations table");
+    }
+    const summariesInfo = this.db.query("PRAGMA table_info(session_summaries)").all();
+    const sumHasPromptNumber = summariesInfo.some((col) => col.name === "prompt_number");
+    if (!sumHasPromptNumber) {
+      this.db.run("ALTER TABLE session_summaries ADD COLUMN prompt_number INTEGER");
+      logger.debug("DB", "Added prompt_number column to session_summaries table");
+    }
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(6, (/* @__PURE__ */ new Date()).toISOString());
+  }
+  /**
+   * Remove UNIQUE constraint from session_summaries.memory_session_id (migration 7)
+   */
+  removeSessionSummariesUniqueConstraint() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(7);
+    if (applied) return;
+    const summariesIndexes = this.db.query("PRAGMA index_list(session_summaries)").all();
+    const hasUniqueConstraint = summariesIndexes.some((idx) => idx.unique === 1);
+    if (!hasUniqueConstraint) {
+      this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(7, (/* @__PURE__ */ new Date()).toISOString());
+      return;
+    }
+    logger.debug("DB", "Removing UNIQUE constraint from session_summaries.memory_session_id");
+    this.db.run("BEGIN TRANSACTION");
+    this.db.run(`
+      CREATE TABLE session_summaries_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        memory_session_id TEXT NOT NULL,
+        project TEXT NOT NULL,
+        request TEXT,
+        investigated TEXT,
+        learned TEXT,
+        completed TEXT,
+        next_steps TEXT,
+        files_read TEXT,
+        files_edited TEXT,
+        notes TEXT,
+        prompt_number INTEGER,
+        created_at TEXT NOT NULL,
+        created_at_epoch INTEGER NOT NULL,
+        FOREIGN KEY(memory_session_id) REFERENCES sdk_sessions(memory_session_id) ON DELETE CASCADE
+      )
+    `);
+    this.db.run(`
+      INSERT INTO session_summaries_new
+      SELECT id, memory_session_id, project, request, investigated, learned,
+             completed, next_steps, files_read, files_edited, notes,
+             prompt_number, created_at, created_at_epoch
+      FROM session_summaries
+    `);
+    this.db.run("DROP TABLE session_summaries");
+    this.db.run("ALTER TABLE session_summaries_new RENAME TO session_summaries");
+    this.db.run(`
+      CREATE INDEX idx_session_summaries_sdk_session ON session_summaries(memory_session_id);
+      CREATE INDEX idx_session_summaries_project ON session_summaries(project);
+      CREATE INDEX idx_session_summaries_created ON session_summaries(created_at_epoch DESC);
+    `);
+    this.db.run("COMMIT");
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(7, (/* @__PURE__ */ new Date()).toISOString());
+    logger.debug("DB", "Successfully removed UNIQUE constraint from session_summaries.memory_session_id");
+  }
+  /**
+   * Add hierarchical fields to observations table (migration 8)
+   */
+  addObservationHierarchicalFields() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(8);
+    if (applied) return;
+    const tableInfo = this.db.query("PRAGMA table_info(observations)").all();
+    const hasTitle = tableInfo.some((col) => col.name === "title");
+    if (hasTitle) {
+      this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(8, (/* @__PURE__ */ new Date()).toISOString());
+      return;
+    }
+    logger.debug("DB", "Adding hierarchical fields to observations table");
+    this.db.run(`
+      ALTER TABLE observations ADD COLUMN title TEXT;
+      ALTER TABLE observations ADD COLUMN subtitle TEXT;
+      ALTER TABLE observations ADD COLUMN facts TEXT;
+      ALTER TABLE observations ADD COLUMN narrative TEXT;
+      ALTER TABLE observations ADD COLUMN concepts TEXT;
+      ALTER TABLE observations ADD COLUMN files_read TEXT;
+      ALTER TABLE observations ADD COLUMN files_modified TEXT;
+    `);
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(8, (/* @__PURE__ */ new Date()).toISOString());
+    logger.debug("DB", "Successfully added hierarchical fields to observations table");
+  }
+  /**
+   * Make observations.text nullable (migration 9)
+   * The text field is deprecated in favor of structured fields (title, subtitle, narrative, etc.)
+   */
+  makeObservationsTextNullable() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(9);
+    if (applied) return;
+    const tableInfo = this.db.query("PRAGMA table_info(observations)").all();
+    const textColumn = tableInfo.find((col) => col.name === "text");
+    if (!textColumn || textColumn.notnull === 0) {
+      this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(9, (/* @__PURE__ */ new Date()).toISOString());
+      return;
+    }
+    logger.debug("DB", "Making observations.text nullable");
+    this.db.run("BEGIN TRANSACTION");
+    this.db.run(`
+      CREATE TABLE observations_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        memory_session_id TEXT NOT NULL,
+        project TEXT NOT NULL,
+        text TEXT,
+        type TEXT NOT NULL CHECK(type IN ('decision', 'bugfix', 'feature', 'refactor', 'discovery', 'change')),
+        title TEXT,
+        subtitle TEXT,
+        facts TEXT,
+        narrative TEXT,
+        concepts TEXT,
+        files_read TEXT,
+        files_modified TEXT,
+        prompt_number INTEGER,
+        created_at TEXT NOT NULL,
+        created_at_epoch INTEGER NOT NULL,
+        FOREIGN KEY(memory_session_id) REFERENCES sdk_sessions(memory_session_id) ON DELETE CASCADE
+      )
+    `);
+    this.db.run(`
+      INSERT INTO observations_new
+      SELECT id, memory_session_id, project, text, type, title, subtitle, facts,
+             narrative, concepts, files_read, files_modified, prompt_number,
+             created_at, created_at_epoch
+      FROM observations
+    `);
+    this.db.run("DROP TABLE observations");
+    this.db.run("ALTER TABLE observations_new RENAME TO observations");
+    this.db.run(`
+      CREATE INDEX idx_observations_sdk_session ON observations(memory_session_id);
+      CREATE INDEX idx_observations_project ON observations(project);
+      CREATE INDEX idx_observations_type ON observations(type);
+      CREATE INDEX idx_observations_created ON observations(created_at_epoch DESC);
+    `);
+    this.db.run("COMMIT");
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(9, (/* @__PURE__ */ new Date()).toISOString());
+    logger.debug("DB", "Successfully made observations.text nullable");
+  }
+  /**
+   * Create user_prompts table with FTS5 support (migration 10)
+   */
+  createUserPromptsTable() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(10);
+    if (applied) return;
+    const tableInfo = this.db.query("PRAGMA table_info(user_prompts)").all();
+    if (tableInfo.length > 0) {
+      this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(10, (/* @__PURE__ */ new Date()).toISOString());
+      return;
+    }
+    logger.debug("DB", "Creating user_prompts table with FTS5 support");
+    this.db.run("BEGIN TRANSACTION");
+    this.db.run(`
+      CREATE TABLE user_prompts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT NOT NULL,
+        prompt_number INTEGER NOT NULL,
+        prompt_text TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        created_at_epoch INTEGER NOT NULL,
+        FOREIGN KEY(content_session_id) REFERENCES sdk_sessions(content_session_id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX idx_user_prompts_claude_session ON user_prompts(content_session_id);
+      CREATE INDEX idx_user_prompts_created ON user_prompts(created_at_epoch DESC);
+      CREATE INDEX idx_user_prompts_prompt_number ON user_prompts(prompt_number);
+      CREATE INDEX idx_user_prompts_lookup ON user_prompts(content_session_id, prompt_number);
+    `);
+    this.db.run(`
+      CREATE VIRTUAL TABLE user_prompts_fts USING fts5(
+        prompt_text,
+        content='user_prompts',
+        content_rowid='id'
+      );
+    `);
+    this.db.run(`
+      CREATE TRIGGER user_prompts_ai AFTER INSERT ON user_prompts BEGIN
+        INSERT INTO user_prompts_fts(rowid, prompt_text)
+        VALUES (new.id, new.prompt_text);
+      END;
+
+      CREATE TRIGGER user_prompts_ad AFTER DELETE ON user_prompts BEGIN
+        INSERT INTO user_prompts_fts(user_prompts_fts, rowid, prompt_text)
+        VALUES('delete', old.id, old.prompt_text);
+      END;
+
+      CREATE TRIGGER user_prompts_au AFTER UPDATE ON user_prompts BEGIN
+        INSERT INTO user_prompts_fts(user_prompts_fts, rowid, prompt_text)
+        VALUES('delete', old.id, old.prompt_text);
+        INSERT INTO user_prompts_fts(rowid, prompt_text)
+        VALUES (new.id, new.prompt_text);
+      END;
+    `);
+    this.db.run("COMMIT");
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(10, (/* @__PURE__ */ new Date()).toISOString());
+    logger.debug("DB", "Successfully created user_prompts table with FTS5 support");
+  }
+  /**
+   * Ensure discovery_tokens column exists (migration 11)
+   * CRITICAL: This migration was incorrectly using version 7 (which was already taken by removeSessionSummariesUniqueConstraint)
+   * The duplicate version number may have caused migration tracking issues in some databases
+   */
+  ensureDiscoveryTokensColumn() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(11);
+    if (applied) return;
+    const observationsInfo = this.db.query("PRAGMA table_info(observations)").all();
+    const obsHasDiscoveryTokens = observationsInfo.some((col) => col.name === "discovery_tokens");
+    if (!obsHasDiscoveryTokens) {
+      this.db.run("ALTER TABLE observations ADD COLUMN discovery_tokens INTEGER DEFAULT 0");
+      logger.debug("DB", "Added discovery_tokens column to observations table");
+    }
+    const summariesInfo = this.db.query("PRAGMA table_info(session_summaries)").all();
+    const sumHasDiscoveryTokens = summariesInfo.some((col) => col.name === "discovery_tokens");
+    if (!sumHasDiscoveryTokens) {
+      this.db.run("ALTER TABLE session_summaries ADD COLUMN discovery_tokens INTEGER DEFAULT 0");
+      logger.debug("DB", "Added discovery_tokens column to session_summaries table");
+    }
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(11, (/* @__PURE__ */ new Date()).toISOString());
+  }
+  /**
+   * Create pending_messages table for persistent work queue (migration 16)
+   * Messages are persisted before processing and deleted after success.
+   * Enables recovery from SDK hangs and worker crashes.
+   */
+  createPendingMessagesTable() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(16);
+    if (applied) return;
+    const tables = this.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='pending_messages'").all();
+    if (tables.length > 0) {
+      this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(16, (/* @__PURE__ */ new Date()).toISOString());
+      return;
+    }
+    logger.debug("DB", "Creating pending_messages table");
+    this.db.run(`
+      CREATE TABLE pending_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_db_id INTEGER NOT NULL,
+        content_session_id TEXT NOT NULL,
+        message_type TEXT NOT NULL CHECK(message_type IN ('observation', 'summarize')),
+        tool_name TEXT,
+        tool_input TEXT,
+        tool_response TEXT,
+        cwd TEXT,
+        last_user_message TEXT,
+        last_assistant_message TEXT,
+        prompt_number INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'processed', 'failed')),
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        created_at_epoch INTEGER NOT NULL,
+        started_processing_at_epoch INTEGER,
+        completed_at_epoch INTEGER,
+        FOREIGN KEY (session_db_id) REFERENCES sdk_sessions(id) ON DELETE CASCADE
+      )
+    `);
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_pending_messages_session ON pending_messages(session_db_id)");
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_pending_messages_status ON pending_messages(status)");
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_pending_messages_claude_session ON pending_messages(content_session_id)");
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(16, (/* @__PURE__ */ new Date()).toISOString());
+    logger.debug("DB", "pending_messages table created successfully");
+  }
+  /**
+   * Rename session ID columns for semantic clarity (migration 17)
+   * - claude_session_id -> content_session_id (user's observed session)
+   * - sdk_session_id -> memory_session_id (memory agent's session for resume)
+   *
+   * IDEMPOTENT: Checks each table individually before renaming.
+   * This handles databases in any intermediate state (partial migration, fresh install, etc.)
+   */
+  renameSessionIdColumns() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(17);
+    if (applied) return;
+    logger.debug("DB", "Checking session ID columns for semantic clarity rename");
+    let renamesPerformed = 0;
+    const safeRenameColumn = (table, oldCol, newCol) => {
+      const tableInfo = this.db.query(`PRAGMA table_info(${table})`).all();
+      const hasOldCol = tableInfo.some((col) => col.name === oldCol);
+      const hasNewCol = tableInfo.some((col) => col.name === newCol);
+      if (hasNewCol) {
+        return false;
+      }
+      if (hasOldCol) {
+        this.db.run(`ALTER TABLE ${table} RENAME COLUMN ${oldCol} TO ${newCol}`);
+        logger.debug("DB", `Renamed ${table}.${oldCol} to ${newCol}`);
+        return true;
+      }
+      logger.warn("DB", `Column ${oldCol} not found in ${table}, skipping rename`);
+      return false;
+    };
+    if (safeRenameColumn("sdk_sessions", "claude_session_id", "content_session_id")) renamesPerformed++;
+    if (safeRenameColumn("sdk_sessions", "sdk_session_id", "memory_session_id")) renamesPerformed++;
+    if (safeRenameColumn("pending_messages", "claude_session_id", "content_session_id")) renamesPerformed++;
+    if (safeRenameColumn("observations", "sdk_session_id", "memory_session_id")) renamesPerformed++;
+    if (safeRenameColumn("session_summaries", "sdk_session_id", "memory_session_id")) renamesPerformed++;
+    if (safeRenameColumn("user_prompts", "claude_session_id", "content_session_id")) renamesPerformed++;
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(17, (/* @__PURE__ */ new Date()).toISOString());
+    if (renamesPerformed > 0) {
+      logger.debug("DB", `Successfully renamed ${renamesPerformed} session ID columns`);
+    } else {
+      logger.debug("DB", "No session ID column renames needed (already up to date)");
+    }
+  }
+  /**
+   * Repair session ID column renames (migration 19)
+   * DEPRECATED: Migration 17 is now fully idempotent and handles all cases.
+   * This migration is kept for backwards compatibility but does nothing.
+   */
+  repairSessionIdColumnRename() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(19);
+    if (applied) return;
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(19, (/* @__PURE__ */ new Date()).toISOString());
+  }
+  /**
+   * Add failed_at_epoch column to pending_messages (migration 20)
+   * Used by markSessionMessagesFailed() for error recovery tracking
+   */
+  addFailedAtEpochColumn() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(20);
+    if (applied) return;
+    const tableInfo = this.db.query("PRAGMA table_info(pending_messages)").all();
+    const hasColumn = tableInfo.some((col) => col.name === "failed_at_epoch");
+    if (!hasColumn) {
+      this.db.run("ALTER TABLE pending_messages ADD COLUMN failed_at_epoch INTEGER");
+      logger.debug("DB", "Added failed_at_epoch column to pending_messages table");
+    }
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(20, (/* @__PURE__ */ new Date()).toISOString());
+  }
+  /**
+   * Create raw_observations table for direct hook storage (migration 21)
+   * Stores raw tool data directly from hooks — no AI processing, no subprocess spawning.
+   * FTS5 index on tool_name and tool_input only (tool_response is too large for FTS).
+   */
+  addRawObservationsTable() {
+    const applied = this.db.prepare("SELECT version FROM schema_versions WHERE version = ?").get(21);
+    if (applied) return;
+    const tables = this.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='raw_observations'").all();
+    if (tables.length > 0) {
+      this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(21, (/* @__PURE__ */ new Date()).toISOString());
+      return;
+    }
+    logger.debug("DB", "Creating raw_observations table");
+    this.db.run("BEGIN TRANSACTION");
+    this.db.run(`
+      CREATE TABLE raw_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT NOT NULL,
+        project TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        tool_input TEXT,
+        tool_response TEXT,
+        cwd TEXT,
+        prompt_number INTEGER,
+        created_at TEXT NOT NULL,
+        created_at_epoch INTEGER NOT NULL
+      )
+    `);
+    this.db.run("CREATE INDEX idx_raw_obs_session ON raw_observations(content_session_id)");
+    this.db.run("CREATE INDEX idx_raw_obs_project ON raw_observations(project)");
+    this.db.run("CREATE INDEX idx_raw_obs_tool ON raw_observations(tool_name)");
+    this.db.run("CREATE INDEX idx_raw_obs_created ON raw_observations(created_at_epoch DESC)");
+    this.db.run(`
+      CREATE VIRTUAL TABLE raw_observations_fts USING fts5(
+        tool_name,
+        tool_input,
+        content='raw_observations',
+        content_rowid='id'
+      )
+    `);
+    this.db.run(`
+      CREATE TRIGGER raw_obs_ai AFTER INSERT ON raw_observations BEGIN
+        INSERT INTO raw_observations_fts(rowid, tool_name, tool_input)
+        VALUES (new.id, new.tool_name, new.tool_input);
+      END;
+
+      CREATE TRIGGER raw_obs_ad AFTER DELETE ON raw_observations BEGIN
+        INSERT INTO raw_observations_fts(raw_observations_fts, rowid, tool_name, tool_input)
+        VALUES('delete', old.id, old.tool_name, old.tool_input);
+      END;
+
+      CREATE TRIGGER raw_obs_au AFTER UPDATE ON raw_observations BEGIN
+        INSERT INTO raw_observations_fts(raw_observations_fts, rowid, tool_name, tool_input)
+        VALUES('delete', old.id, old.tool_name, old.tool_input);
+        INSERT INTO raw_observations_fts(rowid, tool_name, tool_input)
+        VALUES (new.id, new.tool_name, new.tool_input);
+      END;
+    `);
+    this.db.run("COMMIT");
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(21, (/* @__PURE__ */ new Date()).toISOString());
+    logger.debug("DB", "raw_observations table created successfully");
+  }
+};
+
+// src/services/sqlite/DirectDB.ts
+function openDatabase(dbPath = DB_PATH) {
+  if (dbPath !== ":memory:") {
+    ensureDir(DATA_DIR);
+  }
+  const db2 = new import_bun_sqlite.Database(dbPath, { create: true, readwrite: true });
+  db2.run("PRAGMA journal_mode = WAL");
+  db2.run("PRAGMA busy_timeout = 5000");
+  db2.run("PRAGMA synchronous = NORMAL");
+  db2.run("PRAGMA foreign_keys = ON");
+  db2.run("PRAGMA temp_store = memory");
+  const migrationRunner = new MigrationRunner(db2);
+  migrationRunner.runAllMigrations();
+  return db2;
 }
 
 // src/servers/mcp-server.ts
@@ -21126,84 +21653,290 @@ var _originalLog = console["log"];
 console["log"] = (...args) => {
   logger.error("CONSOLE", "Intercepted console output (MCP protocol protection)", void 0, { args });
 };
-var WORKER_PORT = getWorkerPort();
-var WORKER_HOST = getWorkerHost();
-var WORKER_BASE_URL = `http://${WORKER_HOST}:${WORKER_PORT}`;
-var TOOL_ENDPOINT_MAP = {
-  "search": "/api/search",
-  "timeline": "/api/timeline"
-};
-async function callWorkerAPI(endpoint, params) {
-  logger.debug("SYSTEM", "\u2192 Worker API", void 0, { endpoint, params });
-  try {
-    const searchParams = new URLSearchParams();
-    for (const [key, value] of Object.entries(params)) {
-      if (value !== void 0 && value !== null) {
-        searchParams.append(key, String(value));
+var db;
+try {
+  db = openDatabase();
+} catch (error2) {
+  logger.error("SYSTEM", "Failed to open database", void 0, error2);
+  process.exit(1);
+}
+var stmtCache = /* @__PURE__ */ new Map();
+function cachedPrepare(sql) {
+  let stmt = stmtCache.get(sql);
+  if (!stmt) {
+    stmt = db.prepare(sql);
+    stmtCache.set(sql, stmt);
+  }
+  return stmt;
+}
+function finalizeAllStatements() {
+  for (const stmt of stmtCache.values()) {
+    try {
+      stmt.finalize();
+    } catch {
+    }
+  }
+  stmtCache.clear();
+}
+function handleSearch(args) {
+  const query = args.query || "";
+  const limit = Math.min(Number(args.limit) || 20, 100);
+  const project = args.project;
+  const offset = Number(args.offset) || 0;
+  const results = [];
+  if (query.trim()) {
+    const ftsQuery = query.split(/\s+/).map((term) => `"${term.replace(/"/g, "")}"`).join(" ");
+    try {
+      if (project) {
+        const rawResults = cachedPrepare(
+          `SELECT r.id, 'raw' as source, r.content_session_id, r.project, r.tool_name,
+                  NULL as title, NULL as type, r.created_at, r.created_at_epoch
+           FROM raw_observations r
+           JOIN raw_observations_fts f ON r.id = f.rowid
+           WHERE raw_observations_fts MATCH ? AND r.project = ?
+           ORDER BY r.created_at_epoch DESC LIMIT ? OFFSET ?`
+        ).all(ftsQuery, project, limit, offset);
+        results.push(...rawResults);
+      } else {
+        const rawResults = cachedPrepare(
+          `SELECT r.id, 'raw' as source, r.content_session_id, r.project, r.tool_name,
+                  NULL as title, NULL as type, r.created_at, r.created_at_epoch
+           FROM raw_observations r
+           JOIN raw_observations_fts f ON r.id = f.rowid
+           WHERE raw_observations_fts MATCH ?
+           ORDER BY r.created_at_epoch DESC LIMIT ? OFFSET ?`
+        ).all(ftsQuery, limit, offset);
+        results.push(...rawResults);
+      }
+    } catch {
+      const likePattern = `%${query}%`;
+      if (project) {
+        const rawResults = cachedPrepare(
+          `SELECT id, 'raw' as source, content_session_id, project, tool_name,
+                  NULL as title, NULL as type, created_at, created_at_epoch
+           FROM raw_observations
+           WHERE (tool_name LIKE ? OR tool_input LIKE ?) AND project = ?
+           ORDER BY created_at_epoch DESC LIMIT ? OFFSET ?`
+        ).all(likePattern, likePattern, project, limit, offset);
+        results.push(...rawResults);
+      } else {
+        const rawResults = cachedPrepare(
+          `SELECT id, 'raw' as source, content_session_id, project, tool_name,
+                  NULL as title, NULL as type, created_at, created_at_epoch
+           FROM raw_observations
+           WHERE (tool_name LIKE ? OR tool_input LIKE ?)
+           ORDER BY created_at_epoch DESC LIMIT ? OFFSET ?`
+        ).all(likePattern, likePattern, limit, offset);
+        results.push(...rawResults);
       }
     }
-    const url2 = `${WORKER_BASE_URL}${endpoint}?${searchParams}`;
-    const response = await fetch(url2);
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Worker API error (${response.status}): ${errorText}`);
+  } else {
+    if (project) {
+      const rawResults = cachedPrepare(
+        `SELECT id, 'raw' as source, content_session_id, project, tool_name,
+                NULL as title, NULL as type, created_at, created_at_epoch
+         FROM raw_observations WHERE project = ?
+         ORDER BY created_at_epoch DESC LIMIT ? OFFSET ?`
+      ).all(project, limit, offset);
+      results.push(...rawResults);
+    } else {
+      const rawResults = cachedPrepare(
+        `SELECT id, 'raw' as source, content_session_id, project, tool_name,
+                NULL as title, NULL as type, created_at, created_at_epoch
+         FROM raw_observations
+         ORDER BY created_at_epoch DESC LIMIT ? OFFSET ?`
+      ).all(limit, offset);
+      results.push(...rawResults);
     }
-    const data = await response.json();
-    logger.debug("SYSTEM", "\u2190 Worker API success", void 0, { endpoint });
-    return data;
-  } catch (error2) {
-    logger.error("SYSTEM", "\u2190 Worker API error", { endpoint }, error2);
-    return {
-      content: [{
-        type: "text",
-        text: `Error calling Worker API: ${error2 instanceof Error ? error2.message : String(error2)}`
-      }],
-      isError: true
-    };
   }
-}
-async function callWorkerAPIPost(endpoint, body) {
-  logger.debug("HTTP", "Worker API request (POST)", void 0, { endpoint });
   try {
-    const url2 = `${WORKER_BASE_URL}${endpoint}`;
-    const response = await fetch(url2, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(body)
-    });
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Worker API error (${response.status}): ${errorText}`);
+    if (query.trim()) {
+      const likePattern = `%${query}%`;
+      if (project) {
+        const legacyResults = cachedPrepare(
+          `SELECT id, 'legacy' as source, COALESCE(memory_session_id, '') as content_session_id,
+                  project, NULL as tool_name, title, type, created_at, created_at_epoch
+           FROM observations
+           WHERE (title LIKE ? OR text LIKE ? OR narrative LIKE ?) AND project = ?
+           ORDER BY created_at_epoch DESC LIMIT ? OFFSET ?`
+        ).all(likePattern, likePattern, likePattern, project, Math.floor(limit / 2), offset);
+        results.push(...legacyResults);
+      } else {
+        const legacyResults = cachedPrepare(
+          `SELECT id, 'legacy' as source, COALESCE(memory_session_id, '') as content_session_id,
+                  project, NULL as tool_name, title, type, created_at, created_at_epoch
+           FROM observations
+           WHERE (title LIKE ? OR text LIKE ? OR narrative LIKE ?)
+           ORDER BY created_at_epoch DESC LIMIT ? OFFSET ?`
+        ).all(likePattern, likePattern, likePattern, Math.floor(limit / 2), offset);
+        results.push(...legacyResults);
+      }
+    } else {
+      if (project) {
+        const legacyResults = cachedPrepare(
+          `SELECT id, 'legacy' as source, COALESCE(memory_session_id, '') as content_session_id,
+                  project, NULL as tool_name, title, type, created_at, created_at_epoch
+           FROM observations WHERE project = ?
+           ORDER BY created_at_epoch DESC LIMIT ? OFFSET ?`
+        ).all(project, Math.floor(limit / 2), offset);
+        results.push(...legacyResults);
+      } else {
+        const legacyResults = cachedPrepare(
+          `SELECT id, 'legacy' as source, COALESCE(memory_session_id, '') as content_session_id,
+                  project, NULL as tool_name, title, type, created_at, created_at_epoch
+           FROM observations
+           ORDER BY created_at_epoch DESC LIMIT ? OFFSET ?`
+        ).all(Math.floor(limit / 2), offset);
+        results.push(...legacyResults);
+      }
     }
-    const data = await response.json();
-    logger.debug("HTTP", "Worker API success (POST)", void 0, { endpoint });
-    return {
-      content: [{
-        type: "text",
-        text: JSON.stringify(data, null, 2)
-      }]
-    };
-  } catch (error2) {
-    logger.error("HTTP", "Worker API error (POST)", { endpoint }, error2);
-    return {
-      content: [{
-        type: "text",
-        text: `Error calling Worker API: ${error2 instanceof Error ? error2.message : String(error2)}`
-      }],
-      isError: true
-    };
+  } catch {
   }
+  results.sort((a, b) => b.created_at_epoch - a.created_at_epoch);
+  const lines = results.slice(0, limit).map((r) => {
+    const source = r.source === "raw" ? "R" : "L";
+    const tool = r.tool_name || r.type || "";
+    const title = r.title || "";
+    return `[${source}:${r.id}] ${r.created_at} | ${r.project} | ${tool} ${title}`.trim();
+  });
+  return {
+    content: [{
+      type: "text",
+      text: lines.length > 0 ? `Found ${results.length} results:
+
+${lines.join("\n")}
+
+Use get_observations(ids=[...]) for full details. R=raw, L=legacy.` : "No results found."
+    }]
+  };
 }
-async function verifyWorkerConnection() {
-  try {
-    const response = await fetch(`${WORKER_BASE_URL}/api/health`);
-    return response.ok;
-  } catch (error2) {
-    logger.debug("SYSTEM", "Worker health check failed", {}, error2);
-    return false;
+function handleTimeline(args) {
+  const anchor = Number(args.anchor) || 0;
+  const depthBefore = Math.min(Number(args.depth_before) || 3, 20);
+  const depthAfter = Math.min(Number(args.depth_after) || 3, 20);
+  const project = args.project;
+  const source = args.source || "raw";
+  if (!anchor) {
+    return { content: [{ type: "text", text: "Error: anchor (observation ID) is required" }] };
   }
+  if (source === "legacy") {
+    const anchorObs2 = cachedPrepare("SELECT created_at_epoch, project FROM observations WHERE id = ?").get(anchor);
+    if (!anchorObs2) {
+      return { content: [{ type: "text", text: `Legacy observation ${anchor} not found` }] };
+    }
+    const epochBefore2 = anchorObs2.created_at_epoch - 3600 * depthBefore;
+    const epochAfter2 = anchorObs2.created_at_epoch + 3600 * depthAfter;
+    const rows2 = project ? cachedPrepare(
+      `SELECT id, COALESCE(memory_session_id, '') as session_id, project, type, title, created_at, created_at_epoch
+           FROM observations WHERE created_at_epoch >= ? AND created_at_epoch <= ? AND project = ?
+           ORDER BY created_at_epoch ASC LIMIT 50`
+    ).all(epochBefore2, epochAfter2, project) : cachedPrepare(
+      `SELECT id, COALESCE(memory_session_id, '') as session_id, project, type, title, created_at, created_at_epoch
+           FROM observations WHERE created_at_epoch >= ? AND created_at_epoch <= ?
+           ORDER BY created_at_epoch ASC LIMIT 50`
+    ).all(epochBefore2, epochAfter2);
+    const lines2 = rows2.map((r) => `[L:${r.id}]${r.id === anchor ? " >>> " : " "}${r.created_at} | ${r.project} | ${r.type} ${r.title || ""}`);
+    return { content: [{ type: "text", text: lines2.join("\n") || "No timeline data found." }] };
+  }
+  const anchorObs = cachedPrepare("SELECT created_at_epoch, project FROM raw_observations WHERE id = ?").get(anchor);
+  if (!anchorObs) {
+    return { content: [{ type: "text", text: `Raw observation ${anchor} not found` }] };
+  }
+  const epochBefore = anchorObs.created_at_epoch - 3600 * depthBefore;
+  const epochAfter = anchorObs.created_at_epoch + 3600 * depthAfter;
+  const rows = project ? cachedPrepare(
+    `SELECT id, content_session_id, project, tool_name, created_at, created_at_epoch
+         FROM raw_observations WHERE created_at_epoch >= ? AND created_at_epoch <= ? AND project = ?
+         ORDER BY created_at_epoch ASC LIMIT 50`
+  ).all(epochBefore, epochAfter, project) : cachedPrepare(
+    `SELECT id, content_session_id, project, tool_name, created_at, created_at_epoch
+         FROM raw_observations WHERE created_at_epoch >= ? AND created_at_epoch <= ?
+         ORDER BY created_at_epoch ASC LIMIT 50`
+  ).all(epochBefore, epochAfter);
+  const lines = rows.map((r) => `[R:${r.id}]${r.id === anchor ? " >>> " : " "}${r.created_at} | ${r.project} | ${r.tool_name}`);
+  return { content: [{ type: "text", text: lines.join("\n") || "No timeline data found." }] };
+}
+function parseIds(ids) {
+  const rawIds = [];
+  const legacyIds = [];
+  for (const id of ids) {
+    const s = String(id).trim();
+    if (s.startsWith("R:") || s.startsWith("r:")) {
+      const num = Number(s.slice(2));
+      if (!isNaN(num) && num > 0) rawIds.push(num);
+    } else if (s.startsWith("L:") || s.startsWith("l:")) {
+      const num = Number(s.slice(2));
+      if (!isNaN(num) && num > 0) legacyIds.push(num);
+    } else {
+      const num = Number(s);
+      if (!isNaN(num) && num > 0) {
+        rawIds.push(num);
+        legacyIds.push(num);
+      }
+    }
+  }
+  return { rawIds: rawIds.slice(0, 50), legacyIds: legacyIds.slice(0, 50) };
+}
+function handleGetObservations(args) {
+  const ids = args.ids;
+  if (!ids || ids.length === 0) {
+    return { content: [{ type: "text", text: "Error: ids array is required" }] };
+  }
+  const { rawIds, legacyIds } = parseIds(ids);
+  const results = [];
+  if (rawIds.length > 0) {
+    const rawPlaceholders = rawIds.map(() => "?").join(",");
+    const rawRows = db.prepare(
+      `SELECT * FROM raw_observations WHERE id IN (${rawPlaceholders}) ORDER BY created_at_epoch DESC`
+    ).all(...rawIds);
+    for (const r of rawRows) {
+      results.push({
+        source: "raw",
+        id: r.id,
+        session: r.content_session_id,
+        project: r.project,
+        tool_name: r.tool_name,
+        tool_input: r.tool_input ? truncate(r.tool_input, 2e3) : null,
+        tool_response: r.tool_response ? truncate(r.tool_response, 2e3) : null,
+        cwd: r.cwd,
+        prompt_number: r.prompt_number,
+        created_at: r.created_at
+      });
+    }
+  }
+  if (legacyIds.length > 0) {
+    try {
+      const legacyPlaceholders = legacyIds.map(() => "?").join(",");
+      const legacyRows = db.prepare(
+        `SELECT * FROM observations WHERE id IN (${legacyPlaceholders}) ORDER BY created_at_epoch DESC`
+      ).all(...legacyIds);
+      for (const r of legacyRows) {
+        results.push({
+          source: "legacy",
+          id: r.id,
+          session: r.memory_session_id,
+          project: r.project,
+          type: r.type,
+          title: r.title,
+          subtitle: r.subtitle,
+          text: r.text ? truncate(r.text, 1e3) : null,
+          facts: r.facts,
+          narrative: r.narrative ? truncate(r.narrative, 1e3) : null,
+          created_at: r.created_at
+        });
+      }
+    } catch {
+    }
+  }
+  return {
+    content: [{
+      type: "text",
+      text: results.length > 0 ? JSON.stringify(results, null, 2) : `No observations found for IDs: ${ids.join(", ")}`
+    }]
+  };
+}
+function truncate(s, maxLen) {
+  return s.length > maxLen ? s.slice(0, maxLen) + "...[truncated]" : s;
 }
 var tools = [
   {
@@ -21226,64 +21959,69 @@ NEVER fetch full details without filtering first. 10x token savings.`,
 
 1. **Search** - Get index of results with IDs
    \`search(query="...", limit=20, project="...")\`
-   Returns: Table with IDs, titles, dates (~50-100 tokens/result)
+   Returns: Table with IDs, dates (~50-100 tokens/result)
 
 2. **Timeline** - Get context around interesting results
    \`timeline(anchor=<ID>, depth_before=3, depth_after=3)\`
-   Returns: Chronological context showing what was happening
+   Returns: Chronological context
 
 3. **Fetch** - Get full details ONLY for relevant IDs
-   \`get_observations(ids=[...])\`  # ALWAYS batch for 2+ items
+   \`get_observations(ids=[...])\`
    Returns: Complete details (~500-1000 tokens/result)
 
-**Why:** 10x token savings. Never fetch full details without filtering first.`
+**Why:** 10x token savings. Never fetch full details without filtering first.
+Prefix R: = raw observations, L: = legacy observations.`
       }]
     })
   },
   {
     name: "search",
-    description: "Step 1: Search memory. Returns index with IDs. Params: query, limit, project, type, obs_type, dateStart, dateEnd, offset, orderBy",
+    description: "Step 1: Search memory. Returns index with IDs. Params: query, limit, project, offset",
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: {
+        query: { type: "string", description: "Search query (FTS5 for raw observations, LIKE for legacy)" },
+        limit: { type: "number", description: "Max results (default 20, max 100)" },
+        project: { type: "string", description: "Filter by project name" },
+        offset: { type: "number", description: "Pagination offset" }
+      },
       additionalProperties: true
     },
-    handler: async (args) => {
-      const endpoint = TOOL_ENDPOINT_MAP["search"];
-      return await callWorkerAPI(endpoint, args);
-    }
+    handler: async (args) => handleSearch(args)
   },
   {
     name: "timeline",
-    description: "Step 2: Get context around results. Params: anchor (observation ID) OR query (finds anchor automatically), depth_before, depth_after, project",
+    description: "Step 2: Get context around results. Params: anchor (observation ID), depth_before, depth_after, project, source (raw|legacy)",
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: {
+        anchor: { type: "number", description: "Observation ID to center timeline on" },
+        depth_before: { type: "number", description: "Hours before anchor (default 3)" },
+        depth_after: { type: "number", description: "Hours after anchor (default 3)" },
+        project: { type: "string", description: "Filter by project name" },
+        source: { type: "string", description: "raw (default) or legacy" }
+      },
+      required: ["anchor"],
       additionalProperties: true
     },
-    handler: async (args) => {
-      const endpoint = TOOL_ENDPOINT_MAP["timeline"];
-      return await callWorkerAPI(endpoint, args);
-    }
+    handler: async (args) => handleTimeline(args)
   },
   {
     name: "get_observations",
-    description: "Step 3: Fetch full details for filtered IDs. Params: ids (array of observation IDs, required), orderBy, limit, project",
+    description: "Step 3: Fetch full details for filtered IDs. Params: ids (array of observation IDs)",
     inputSchema: {
       type: "object",
       properties: {
         ids: {
           type: "array",
-          items: { type: "number" },
-          description: "Array of observation IDs to fetch (required)"
+          items: { oneOf: [{ type: "number" }, { type: "string" }] },
+          description: "Array of observation IDs \u2014 use R:1 for raw, L:5 for legacy, or plain numbers"
         }
       },
       required: ["ids"],
       additionalProperties: true
     },
-    handler: async (args) => {
-      return await callWorkerAPIPost("/api/observations/batch", args);
-    }
+    handler: async (args) => handleGetObservations(args)
   }
 ];
 var server = new Server(
@@ -21294,7 +22032,6 @@ var server = new Server(
   {
     capabilities: {
       tools: {}
-      // Exposes tools capability (handled by ListToolsRequestSchema and CallToolRequestSchema)
     }
   }
 );
@@ -21327,6 +22064,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 async function cleanup() {
   logger.info("SYSTEM", "MCP server shutting down");
+  finalizeAllStatements();
+  try {
+    db.close();
+  } catch {
+  }
   process.exit(0);
 }
 process.on("SIGTERM", cleanup);
@@ -21334,17 +22076,7 @@ process.on("SIGINT", cleanup);
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  logger.info("SYSTEM", "Claude-recall search server started");
-  setTimeout(async () => {
-    const workerAvailable = await verifyWorkerConnection();
-    if (!workerAvailable) {
-      logger.error("SYSTEM", "Worker not available", void 0, { workerUrl: WORKER_BASE_URL });
-      logger.error("SYSTEM", "Tools will fail until Worker is started");
-      logger.error("SYSTEM", "Start Worker with: npm run worker:restart");
-    } else {
-      logger.info("SYSTEM", "Worker available", void 0, { workerUrl: WORKER_BASE_URL });
-    }
-  }, 0);
+  logger.info("SYSTEM", "Claude-recall search server started (direct SQLite mode)");
 }
 main().catch((error2) => {
   logger.error("SYSTEM", "Fatal error", void 0, error2);

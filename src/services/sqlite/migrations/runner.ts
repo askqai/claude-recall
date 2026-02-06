@@ -31,6 +31,7 @@ export class MigrationRunner {
     this.renameSessionIdColumns();
     this.repairSessionIdColumnRename();
     this.addFailedAtEpochColumn();
+    this.addRawObservationsTable();
   }
 
   /**
@@ -627,5 +628,81 @@ export class MigrationRunner {
     }
 
     this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(20, new Date().toISOString());
+  }
+
+  /**
+   * Create raw_observations table for direct hook storage (migration 21)
+   * Stores raw tool data directly from hooks — no AI processing, no subprocess spawning.
+   * FTS5 index on tool_name and tool_input only (tool_response is too large for FTS).
+   */
+  private addRawObservationsTable(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(21) as SchemaVersion | undefined;
+    if (applied) return;
+
+    const tables = this.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='raw_observations'").all() as TableNameRow[];
+    if (tables.length > 0) {
+      this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(21, new Date().toISOString());
+      return;
+    }
+
+    logger.debug('DB', 'Creating raw_observations table');
+
+    this.db.run('BEGIN TRANSACTION');
+
+    this.db.run(`
+      CREATE TABLE raw_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT NOT NULL,
+        project TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        tool_input TEXT,
+        tool_response TEXT,
+        cwd TEXT,
+        prompt_number INTEGER,
+        created_at TEXT NOT NULL,
+        created_at_epoch INTEGER NOT NULL
+      )
+    `);
+
+    this.db.run('CREATE INDEX idx_raw_obs_session ON raw_observations(content_session_id)');
+    this.db.run('CREATE INDEX idx_raw_obs_project ON raw_observations(project)');
+    this.db.run('CREATE INDEX idx_raw_obs_tool ON raw_observations(tool_name)');
+    this.db.run('CREATE INDEX idx_raw_obs_created ON raw_observations(created_at_epoch DESC)');
+
+    // FTS5 on tool_name and tool_input only (tool_response is too large)
+    this.db.run(`
+      CREATE VIRTUAL TABLE raw_observations_fts USING fts5(
+        tool_name,
+        tool_input,
+        content='raw_observations',
+        content_rowid='id'
+      )
+    `);
+
+    // Triggers to sync FTS5
+    this.db.run(`
+      CREATE TRIGGER raw_obs_ai AFTER INSERT ON raw_observations BEGIN
+        INSERT INTO raw_observations_fts(rowid, tool_name, tool_input)
+        VALUES (new.id, new.tool_name, new.tool_input);
+      END;
+
+      CREATE TRIGGER raw_obs_ad AFTER DELETE ON raw_observations BEGIN
+        INSERT INTO raw_observations_fts(raw_observations_fts, rowid, tool_name, tool_input)
+        VALUES('delete', old.id, old.tool_name, old.tool_input);
+      END;
+
+      CREATE TRIGGER raw_obs_au AFTER UPDATE ON raw_observations BEGIN
+        INSERT INTO raw_observations_fts(raw_observations_fts, rowid, tool_name, tool_input)
+        VALUES('delete', old.id, old.tool_name, old.tool_input);
+        INSERT INTO raw_observations_fts(rowid, tool_name, tool_input)
+        VALUES (new.id, new.tool_name, new.tool_input);
+      END;
+    `);
+
+    this.db.run('COMMIT');
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(21, new Date().toISOString());
+
+    logger.debug('DB', 'raw_observations table created successfully');
   }
 }

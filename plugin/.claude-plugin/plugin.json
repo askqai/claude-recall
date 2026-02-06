@@ -1,7 +1,0 @@
-{
-  "name": "claude-recall-plugin",
-  "description": "Persistent memory across Claude Code sessions. Captures tool usage, compresses observations, and injects relevant context into future sessions.",
-  "author": {
-    "name": "Richard Chow"
-  }
-}
