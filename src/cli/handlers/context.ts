@@ -181,10 +181,14 @@ export const contextHandler: EventHandler = {
         };
       }
 
-      // Compact summary of the most recent session with prompts
-      const mostRecent = sessions.find(s => s.prompt_counter > 0) ?? sessions[0];
-      const additionalContext = mostRecent.prompt_counter > 0
-        ? buildCompactSummary(db, mostRecent)
+      // Pick the most substantial recent session (most prompts among the last 5).
+      // A 1-prompt "what was I doing?" session is less useful than a 10-prompt coding session.
+      const withPrompts = sessions.filter(s => s.prompt_counter > 0);
+      const bestSession = withPrompts.length > 0
+        ? withPrompts.reduce((a, b) => a.prompt_counter >= b.prompt_counter ? a : b)
+        : sessions[0];
+      const additionalContext = bestSession.prompt_counter > 0
+        ? buildCompactSummary(db, bestSession)
         : '';
 
       logger.debug('HOOK', 'Context generated', {

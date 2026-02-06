@@ -103,12 +103,16 @@ export const summarizeHandler: EventHandler = {
         [sessionId, project, now.toISOString(), nowEpoch]
       );
 
-      // Store as a special _assistant_responses observation
+      // Store as a special _assistant_responses observation (replace previous snapshot)
       const responsesJson = JSON.stringify(assistantResponses.map(r => JSON.parse(r)));
       const capped = responsesJson.length > 50_000
         ? responsesJson.slice(0, 50_000) + '...[truncated]'
         : responsesJson;
 
+      db.run(
+        `DELETE FROM raw_observations WHERE content_session_id = ? AND tool_name = '_assistant_responses'`,
+        [sessionId]
+      );
       db.run(
         `INSERT INTO raw_observations (content_session_id, project, tool_name, tool_input, tool_response, cwd, prompt_number, created_at, created_at_epoch)
          VALUES (?, ?, '_assistant_responses', NULL, ?, ?, ?, ?, ?)`,

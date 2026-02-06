@@ -1237,8 +1237,9 @@ var contextHandler = {
           }
         };
       }
-      const mostRecent = sessions.find((s) => s.prompt_counter > 0) ?? sessions[0];
-      const additionalContext = mostRecent.prompt_counter > 0 ? buildCompactSummary(db, mostRecent) : "";
+      const withPrompts = sessions.filter((s) => s.prompt_counter > 0);
+      const bestSession = withPrompts.length > 0 ? withPrompts.reduce((a, b) => a.prompt_counter >= b.prompt_counter ? a : b) : sessions[0];
+      const additionalContext = bestSession.prompt_counter > 0 ? buildCompactSummary(db, bestSession) : "";
       logger.debug("HOOK", "Context generated", {
         sessions: sessions.length,
         contextLength: additionalContext.length
@@ -1494,6 +1495,10 @@ var summarizeHandler = {
       );
       const responsesJson = JSON.stringify(assistantResponses.map((r) => JSON.parse(r)));
       const capped = responsesJson.length > 5e4 ? responsesJson.slice(0, 5e4) + "...[truncated]" : responsesJson;
+      db.run(
+        `DELETE FROM raw_observations WHERE content_session_id = ? AND tool_name = '_assistant_responses'`,
+        [sessionId]
+      );
       db.run(
         `INSERT INTO raw_observations (content_session_id, project, tool_name, tool_input, tool_response, cwd, prompt_number, created_at, created_at_epoch)
          VALUES (?, ?, '_assistant_responses', NULL, ?, ?, ?, ?, ?)`,
