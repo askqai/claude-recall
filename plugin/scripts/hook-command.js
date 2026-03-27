@@ -581,6 +581,9 @@ var MigrationRunner = class {
     this.repairSessionIdColumnRename();
     this.addFailedAtEpochColumn();
     this.addRawObservationsTable();
+    this.addRelevanceScoreColumn();
+    this.addPrivacyColumns();
+    this.createConsolidatedSessionsTable();
   }
   /**
    * Initialize database schema using migrations (migration004)
@@ -1079,6 +1082,70 @@ var MigrationRunner = class {
     this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(21, (/* @__PURE__ */ new Date()).toISOString());
     logger.debug("DB", "raw_observations table created successfully");
   }
+  /**
+   * Add relevance_score column to raw_observations (migration 22)
+   * Scores range 0.0-1.0, used for smart cleanup and context injection prioritization.
+   */
+  addRelevanceScoreColumn() {
+    const applied = this.db.prepare("SELECT 1 FROM schema_versions WHERE version = 22").get();
+    if (applied) return;
+    const columns = this.db.prepare("PRAGMA table_info(raw_observations)").all();
+    const hasColumn = columns.some((c) => c.name === "relevance_score");
+    if (!hasColumn) {
+      this.db.run("ALTER TABLE raw_observations ADD COLUMN relevance_score REAL DEFAULT 0.5");
+      this.db.run("CREATE INDEX IF NOT EXISTS idx_raw_obs_relevance ON raw_observations(relevance_score DESC)");
+      logger.debug("DB", "Added relevance_score column to raw_observations");
+    }
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(22, (/* @__PURE__ */ new Date()).toISOString());
+  }
+  /**
+   * Add privacy columns (migration 23)
+   * - sdk_sessions.privacy_suppressed: flag to suppress storage for current prompt
+   * - raw_observations.redacted: marks observations with redacted sensitive content
+   */
+  addPrivacyColumns() {
+    const applied = this.db.prepare("SELECT 1 FROM schema_versions WHERE version = 23").get();
+    if (applied) return;
+    const sessionCols = this.db.prepare("PRAGMA table_info(sdk_sessions)").all();
+    if (!sessionCols.some((c) => c.name === "privacy_suppressed")) {
+      this.db.run("ALTER TABLE sdk_sessions ADD COLUMN privacy_suppressed INTEGER DEFAULT 0");
+      logger.debug("DB", "Added privacy_suppressed column to sdk_sessions");
+    }
+    const obsCols = this.db.prepare("PRAGMA table_info(raw_observations)").all();
+    if (!obsCols.some((c) => c.name === "redacted")) {
+      this.db.run("ALTER TABLE raw_observations ADD COLUMN redacted INTEGER DEFAULT 0");
+      logger.debug("DB", "Added redacted column to raw_observations");
+    }
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(23, (/* @__PURE__ */ new Date()).toISOString());
+  }
+  /**
+   * Create consolidated_sessions table (migration 24)
+   * Stores compressed summaries of old sessions after their raw observations are deleted.
+   */
+  createConsolidatedSessionsTable() {
+    const applied = this.db.prepare("SELECT 1 FROM schema_versions WHERE version = 24").get();
+    if (applied) return;
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS consolidated_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT NOT NULL,
+        project TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        prompt_count INTEGER,
+        tool_use_count INTEGER,
+        files_touched TEXT,
+        commands_run TEXT,
+        original_started_at TEXT,
+        original_started_at_epoch INTEGER NOT NULL,
+        consolidated_at TEXT NOT NULL,
+        consolidated_at_epoch INTEGER NOT NULL
+      )
+    `);
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_consolidated_project ON consolidated_sessions(project)");
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_consolidated_epoch ON consolidated_sessions(original_started_at_epoch DESC)");
+    logger.debug("DB", "consolidated_sessions table created");
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(24, (/* @__PURE__ */ new Date()).toISOString());
+  }
 };
 
 // src/services/sqlite/DirectDB.ts
@@ -1214,6 +1281,34 @@ function buildCompactSummary(db, session) {
   }
   return lines.join("\n").trim();
 }
+function getConsolidatedContext(db, projects, currentLength) {
+  const budget = MAX_SUMMARY_CHARS - currentLength - 200;
+  if (budget < 200) return "";
+  const placeholders = projects.map(() => "?").join(",");
+  let rows;
+  try {
+    rows = db.prepare(
+      `SELECT project, summary, prompt_count, tool_use_count, original_started_at
+       FROM consolidated_sessions
+       WHERE project IN (${placeholders})
+       ORDER BY original_started_at_epoch DESC
+       LIMIT 5`
+    ).all(...projects);
+  } catch {
+    return "";
+  }
+  if (!rows || rows.length === 0) return "";
+  const lines = ["## Older Sessions (consolidated)"];
+  let used = lines[0].length;
+  for (const r of rows) {
+    if (used > budget) break;
+    const snippet = r.summary.length > 150 ? r.summary.slice(0, 150) + "..." : r.summary;
+    const line = `- **${r.original_started_at.split("T")[0]}** (${r.prompt_count}p/${r.tool_use_count}t): ${snippet.replace(/\n/g, " ")}`;
+    lines.push(line);
+    used += line.length;
+  }
+  return lines.join("\n");
+}
 var contextHandler = {
   async execute(input) {
     const cwd = input.cwd ?? process.cwd();
@@ -1239,7 +1334,13 @@ var contextHandler = {
       }
       const withPrompts = sessions.filter((s) => s.prompt_counter > 0);
       const bestSession = withPrompts.length > 0 ? withPrompts.reduce((a, b) => a.prompt_counter >= b.prompt_counter ? a : b) : sessions[0];
-      const additionalContext = bestSession.prompt_counter > 0 ? buildCompactSummary(db, bestSession) : "";
+      let additionalContext = bestSession.prompt_counter > 0 ? buildCompactSummary(db, bestSession) : "";
+      if (additionalContext.length < MAX_SUMMARY_CHARS - 500) {
+        const consolidated = getConsolidatedContext(db, projects, additionalContext.length);
+        if (consolidated) {
+          additionalContext += "\n\n" + consolidated;
+        }
+      }
       logger.debug("HOOK", "Context generated", {
         sessions: sessions.length,
         contextLength: additionalContext.length
@@ -1256,6 +1357,36 @@ var contextHandler = {
   }
 };
 
+// src/utils/privacy.ts
+var PRIVATE_TAG_PATTERN = /<(?:private|no-recall)>/i;
+var SENSITIVE_PATTERNS = [
+  { pattern: /(?:api[_-]?key|apikey|secret[_-]?key|access[_-]?key)\s*[:=]\s*['"]?[a-zA-Z0-9_\-]{20,}/gi, label: "API_KEY" },
+  { pattern: /Bearer\s+[a-zA-Z0-9_\-\.]{20,}/g, label: "BEARER_TOKEN" },
+  { pattern: /(?:AKIA|ASIA)[A-Z0-9]{16}/g, label: "AWS_KEY" },
+  { pattern: /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA )?PRIVATE KEY-----/g, label: "PRIVATE_KEY" },
+  { pattern: /(?:password|passwd|pwd)\s*[:=]\s*['"][^'"]{4,}['"]/gi, label: "PASSWORD" },
+  { pattern: /ghp_[a-zA-Z0-9]{36,}/g, label: "GITHUB_TOKEN" },
+  { pattern: /sk-[a-zA-Z0-9]{32,}/g, label: "OPENAI_KEY" },
+  { pattern: /xox[bpras]-[a-zA-Z0-9\-]{10,}/g, label: "SLACK_TOKEN" }
+];
+function isPrivatePrompt(prompt) {
+  return PRIVATE_TAG_PATTERN.test(prompt);
+}
+function containsSensitivePatterns(text) {
+  return SENSITIVE_PATTERNS.some(({ pattern }) => {
+    pattern.lastIndex = 0;
+    return pattern.test(text);
+  });
+}
+function redactSensitiveContent(text) {
+  let redacted = text;
+  for (const { pattern, label } of SENSITIVE_PATTERNS) {
+    pattern.lastIndex = 0;
+    redacted = redacted.replace(pattern, `[REDACTED:${label}]`);
+  }
+  return redacted;
+}
+
 // src/cli/handlers/session-init.ts
 var sessionInitHandler = {
   async execute(input) {
@@ -1269,6 +1400,7 @@ var sessionInitHandler = {
     const nowEpoch = Math.floor(now.getTime() / 1e3);
     const db = openDatabase();
     try {
+      const isPrivate = isPrivatePrompt(prompt);
       const initSession = db.transaction(() => {
         db.run(
           `INSERT OR IGNORE INTO sdk_sessions (content_session_id, project, started_at, started_at_epoch, status, prompt_counter)
@@ -1276,17 +1408,18 @@ var sessionInitHandler = {
           [sessionId, project, nowIso, nowEpoch]
         );
         db.run(
-          "UPDATE sdk_sessions SET prompt_counter = prompt_counter + 1 WHERE content_session_id = ?",
-          [sessionId]
+          "UPDATE sdk_sessions SET prompt_counter = prompt_counter + 1, privacy_suppressed = ? WHERE content_session_id = ?",
+          [isPrivate ? 1 : 0, sessionId]
         );
         const session = db.prepare(
           "SELECT id, prompt_counter FROM sdk_sessions WHERE content_session_id = ?"
         ).get(sessionId);
         const promptNumber = session.prompt_counter;
+        const promptText = isPrivate ? "[PRIVATE - prompt not stored]" : prompt;
         db.run(
           `INSERT INTO user_prompts (content_session_id, prompt_number, prompt_text, created_at, created_at_epoch)
            VALUES (?, ?, ?, ?, ?)`,
-          [sessionId, promptNumber, prompt, nowIso, nowEpoch]
+          [sessionId, promptNumber, promptText, nowIso, nowEpoch]
         );
         return { sessionDbId: session.id, promptNumber };
       });
@@ -1303,6 +1436,245 @@ var sessionInitHandler = {
 
 // src/cli/handlers/observation.ts
 import { readFileSync as readFileSync3 } from "fs";
+
+// src/cli/handlers/relevance.ts
+var LOW_SIGNAL_FILES = /* @__PURE__ */ new Set([
+  "package.json",
+  "package-lock.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "tsconfig.json",
+  "tsconfig.build.json",
+  ".eslintrc",
+  ".eslintrc.js",
+  ".eslintrc.json",
+  ".prettierrc",
+  ".prettierrc.js",
+  ".prettierrc.json",
+  ".editorconfig",
+  "jest.config.js",
+  "jest.config.ts",
+  "vitest.config.ts",
+  ".gitignore",
+  ".npmrc",
+  ".nvmrc",
+  ".env.example",
+  "Makefile",
+  "Dockerfile",
+  "docker-compose.yml",
+  "docker-compose.yaml",
+  "README.md",
+  "LICENSE",
+  "CHANGELOG.md"
+]);
+var HIGH_SIGNAL_PROMPT_KEYWORDS = /\b(bug|fix|broke|broken|error|crash|fail|issue|decision|architect|design|refactor|migrate|security|vulnerab|incident|rollback|revert)\b/i;
+function computeRelevanceScore(params) {
+  const { toolName, toolInput, toolResponse, recentTools, lastPromptText } = params;
+  if (toolName === "_assistant_responses") return 0;
+  let score = 0.5;
+  const input = normalizeInput(toolInput);
+  const response = normalizeResponse(toolResponse);
+  if (toolName === "Write" || toolName === "Edit") {
+    score = 0.8;
+  } else if (toolName === "Read") {
+    score = scoreRead(input);
+  } else if (toolName === "Glob" || toolName === "Grep") {
+    score = scoreSearch(response);
+  } else if (toolName === "Bash") {
+    score = scoreBash(response);
+  }
+  if (toolName === "Read" && input.file_path) {
+    const dupeCount = recentTools.filter((t) => {
+      if (t.tool_name !== "Read") return false;
+      try {
+        const prev = JSON.parse(t.tool_input ?? "{}");
+        return prev.file_path === input.file_path;
+      } catch {
+        return false;
+      }
+    }).length;
+    if (dupeCount > 0) {
+      score = Math.min(score, 0.2);
+    }
+  }
+  if (lastPromptText && HIGH_SIGNAL_PROMPT_KEYWORDS.test(lastPromptText)) {
+    score = Math.min(1, score + 0.15);
+  }
+  return Math.round(score * 100) / 100;
+}
+function normalizeInput(toolInput) {
+  if (toolInput == null) return {};
+  if (typeof toolInput === "string") {
+    try {
+      return JSON.parse(toolInput);
+    } catch {
+      return {};
+    }
+  }
+  if (typeof toolInput === "object") return toolInput;
+  return {};
+}
+function normalizeResponse(toolResponse) {
+  if (toolResponse == null) return "";
+  if (typeof toolResponse === "string") return toolResponse;
+  return JSON.stringify(toolResponse);
+}
+function scoreRead(input) {
+  const filePath = input.file_path ?? "";
+  if (filePath.includes("node_modules/")) return 0.1;
+  const basename3 = filePath.split("/").pop() ?? "";
+  if (LOW_SIGNAL_FILES.has(basename3)) return 0.1;
+  return 0.5;
+}
+function scoreSearch(response) {
+  if (!response || response === "No results found." || response.includes("0 results")) {
+    return 0.1;
+  }
+  return 0.5;
+}
+function scoreBash(response) {
+  const lower = response.toLowerCase();
+  if (lower.includes("error") || lower.includes("failed") || lower.includes("exit code") || lower.includes("command not found") || lower.includes("permission denied") || lower.includes("fatal:")) {
+    return 0.8;
+  }
+  return 0.5;
+}
+
+// src/services/consolidation.ts
+var SESSIONS_TO_KEEP_PER_PROJECT = 20;
+var MAX_CONSOLIDATION_BATCH = 5;
+var DECAY_AGE_SECONDS = 90 * 24 * 3600;
+var DECAY_FACTOR = 0.5;
+var DECAY_FLOOR = 0.05;
+function consolidateOldSessions(db) {
+  const overflowProjects = db.prepare(`
+    SELECT project, COUNT(*) as session_count
+    FROM sdk_sessions
+    WHERE status = 'completed'
+      AND content_session_id NOT IN (SELECT content_session_id FROM consolidated_sessions)
+      AND EXISTS (SELECT 1 FROM raw_observations WHERE content_session_id = sdk_sessions.content_session_id)
+    GROUP BY project
+    HAVING COUNT(*) > ?
+  `).all(SESSIONS_TO_KEEP_PER_PROJECT);
+  if (overflowProjects.length === 0) return;
+  const sessions = [];
+  for (const { project } of overflowProjects) {
+    const oldest = db.prepare(`
+      SELECT s.content_session_id, s.project, s.started_at, s.started_at_epoch, s.prompt_counter
+      FROM sdk_sessions s
+      WHERE s.status = 'completed'
+        AND s.project = ?
+        AND s.content_session_id NOT IN (SELECT content_session_id FROM consolidated_sessions)
+        AND EXISTS (SELECT 1 FROM raw_observations WHERE content_session_id = s.content_session_id)
+      ORDER BY s.started_at_epoch DESC
+      LIMIT -1 OFFSET ?
+    `).all(project, SESSIONS_TO_KEEP_PER_PROJECT);
+    sessions.push(...oldest);
+    if (sessions.length >= MAX_CONSOLIDATION_BATCH) break;
+  }
+  const batch = sessions.slice(0, MAX_CONSOLIDATION_BATCH);
+  if (batch.length === 0) return;
+  const now = /* @__PURE__ */ new Date();
+  const nowIso = now.toISOString();
+  const nowEpoch = Math.floor(now.getTime() / 1e3);
+  for (const session of batch) {
+    try {
+      const summary = buildSessionSummary(db, session.content_session_id);
+      const toolCount = db.prepare(
+        `SELECT COUNT(*) as cnt FROM raw_observations
+         WHERE content_session_id = ? AND tool_name != '_assistant_responses'`
+      ).get(session.content_session_id)?.cnt ?? 0;
+      const observations = db.prepare(
+        `SELECT tool_name, tool_input FROM raw_observations
+         WHERE content_session_id = ? AND tool_name != '_assistant_responses'`
+      ).all(session.content_session_id);
+      const files = /* @__PURE__ */ new Set();
+      const commands = [];
+      for (const o of observations) {
+        let input = o.tool_input;
+        try {
+          input = JSON.parse(input ?? "");
+        } catch {
+        }
+        if (["Read", "Write", "Edit"].includes(o.tool_name) && input?.file_path) {
+          files.add(input.file_path);
+        }
+        if (o.tool_name === "Bash" && input?.command) {
+          commands.push(typeof input.command === "string" ? input.command.slice(0, 100) : "");
+        }
+      }
+      db.run(
+        `INSERT INTO consolidated_sessions
+         (content_session_id, project, summary, prompt_count, tool_use_count,
+          files_touched, commands_run, original_started_at, original_started_at_epoch,
+          consolidated_at, consolidated_at_epoch)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          session.content_session_id,
+          session.project,
+          summary,
+          session.prompt_counter,
+          toolCount,
+          JSON.stringify([...files].slice(0, 30)),
+          JSON.stringify(commands.slice(0, 15)),
+          session.started_at,
+          session.started_at_epoch,
+          nowIso,
+          nowEpoch
+        ]
+      );
+      db.run("DELETE FROM raw_observations WHERE content_session_id = ?", [session.content_session_id]);
+      db.run("DELETE FROM user_prompts WHERE content_session_id = ?", [session.content_session_id]);
+      logger.info("CONSOLIDATION", `Consolidated session ${session.content_session_id} (${session.project}): ${session.prompt_counter} prompts, ${toolCount} tools \u2192 summary`);
+    } catch (err) {
+      logger.error("CONSOLIDATION", `Failed to consolidate session ${session.content_session_id}`, void 0, err);
+    }
+  }
+}
+function buildSessionSummary(db, sessionId) {
+  const prompts = db.prepare(
+    `SELECT prompt_number, prompt_text FROM user_prompts
+     WHERE content_session_id = ? ORDER BY prompt_number ASC`
+  ).all(sessionId);
+  const lines = [];
+  for (const p of prompts) {
+    const snippet = p.prompt_text.length > 120 ? p.prompt_text.slice(0, 120) + "..." : p.prompt_text;
+    lines.push(`P${p.prompt_number}: ${snippet.replace(/\n/g, " ")}`);
+  }
+  let summary = lines.join("\n");
+  if (summary.length > 500) {
+    summary = summary.slice(0, 497) + "...";
+  }
+  return summary || "(no prompts recorded)";
+}
+function applyTimeDecay(db) {
+  const cutoff = Math.floor(Date.now() / 1e3) - DECAY_AGE_SECONDS;
+  const result = db.run(
+    `UPDATE raw_observations
+     SET relevance_score = MAX(?, relevance_score * ?)
+     WHERE created_at_epoch < ?
+       AND relevance_score > ?`,
+    [DECAY_FLOOR, DECAY_FACTOR, cutoff, DECAY_FLOOR]
+  );
+  if (result.changes > 0) {
+    logger.debug("CONSOLIDATION", `Time decay applied to ${result.changes} observations`);
+  }
+}
+function smartCleanup(db, deleteCount) {
+  const result = db.run(
+    `DELETE FROM raw_observations WHERE id IN (
+      SELECT id FROM raw_observations
+      ORDER BY relevance_score ASC, created_at_epoch ASC
+      LIMIT ?
+    )`,
+    [deleteCount]
+  );
+  if (result.changes > 0) {
+    logger.info("CONSOLIDATION", `Smart cleanup: deleted ${result.changes} low-relevance observations`);
+  }
+}
+
+// src/cli/handlers/observation.ts
 var MAX_RESPONSE_BYTES = 1e4;
 var MAX_INPUT_BYTES = 1e4;
 var MAX_DB_PAGES = 2621440;
@@ -1389,15 +1761,43 @@ var observationHandler = {
         [sessionId, project, now.toISOString(), nowEpoch]
       );
       const session = db.prepare(
-        "SELECT prompt_counter FROM sdk_sessions WHERE content_session_id = ?"
+        "SELECT prompt_counter, privacy_suppressed FROM sdk_sessions WHERE content_session_id = ?"
       ).get(sessionId);
       const promptNumber = session?.prompt_counter ?? 0;
-      const inputStr = truncateStr(stringify(toolInput), MAX_INPUT_BYTES);
-      const responseStr = truncateStr(stringify(toolResponse), MAX_RESPONSE_BYTES);
+      if (session?.privacy_suppressed) {
+        logger.debug("HOOK", "Observation skipped \u2014 privacy suppression active", { toolName });
+        return { continue: true, suppressOutput: true };
+      }
+      let inputStr = truncateStr(stringify(toolInput), MAX_INPUT_BYTES);
+      let responseStr = truncateStr(stringify(toolResponse), MAX_RESPONSE_BYTES);
+      let redacted = 0;
+      if (inputStr && containsSensitivePatterns(inputStr)) {
+        inputStr = redactSensitiveContent(inputStr);
+        redacted = 1;
+      }
+      if (responseStr && containsSensitivePatterns(responseStr)) {
+        responseStr = redactSensitiveContent(responseStr);
+        redacted = 1;
+      }
+      const recentTools = db.prepare(
+        `SELECT tool_name, tool_input FROM raw_observations
+         WHERE content_session_id = ? ORDER BY id DESC LIMIT 5`
+      ).all(sessionId);
+      const lastPrompt = db.prepare(
+        `SELECT prompt_text FROM user_prompts
+         WHERE content_session_id = ? ORDER BY prompt_number DESC LIMIT 1`
+      ).get(sessionId);
+      const relevanceScore = computeRelevanceScore({
+        toolName,
+        toolInput,
+        toolResponse,
+        recentTools,
+        lastPromptText: lastPrompt?.prompt_text
+      });
       db.run(
-        `INSERT INTO raw_observations (content_session_id, project, tool_name, tool_input, tool_response, cwd, prompt_number, created_at, created_at_epoch)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [sessionId, project, toolName, inputStr, responseStr, cwd, promptNumber, now.toISOString(), nowEpoch]
+        `INSERT INTO raw_observations (content_session_id, project, tool_name, tool_input, tool_response, cwd, prompt_number, created_at, created_at_epoch, relevance_score, redacted)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [sessionId, project, toolName, inputStr, responseStr, cwd, promptNumber, now.toISOString(), nowEpoch, relevanceScore, redacted]
       );
       if (transcriptPath) {
         const lastCapture = db.prepare(
@@ -1411,19 +1811,14 @@ var observationHandler = {
         }
       }
       if (Math.random() < CLEANUP_PROBABILITY) {
+        consolidateOldSessions(db);
+        applyTimeDecay(db);
         const pageCount = db.prepare("PRAGMA page_count").get()?.page_count ?? 0;
         if (pageCount > MAX_DB_PAGES) {
           const totalRows = db.prepare("SELECT COUNT(*) as cnt FROM raw_observations").get()?.cnt ?? 0;
           const deleteCount = Math.max(100, Math.floor(totalRows * CLEANUP_BATCH_PERCENT));
-          const deleted = db.run(
-            `DELETE FROM raw_observations WHERE id IN (
-              SELECT id FROM raw_observations ORDER BY created_at_epoch ASC LIMIT ?
-            )`,
-            [deleteCount]
-          );
-          if (deleted.changes > 0) {
-            logger.info("HOOK", `Size cleanup: deleted ${deleted.changes} oldest observations (DB was ${Math.round(pageCount * 4096 / 1024 / 1024)}MB, limit 10GB)`);
-          }
+          smartCleanup(db, deleteCount);
+          logger.info("HOOK", `Size cleanup triggered (DB was ${Math.round(pageCount * 4096 / 1024 / 1024)}MB, limit 10GB)`);
         }
       }
       logger.debug("HOOK", "Raw observation stored", { toolName });

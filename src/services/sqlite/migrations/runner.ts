@@ -32,6 +32,9 @@ export class MigrationRunner {
     this.repairSessionIdColumnRename();
     this.addFailedAtEpochColumn();
     this.addRawObservationsTable();
+    this.addRelevanceScoreColumn();
+    this.addPrivacyColumns();
+    this.createConsolidatedSessionsTable();
   }
 
   /**
@@ -704,5 +707,81 @@ export class MigrationRunner {
     this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(21, new Date().toISOString());
 
     logger.debug('DB', 'raw_observations table created successfully');
+  }
+
+  /**
+   * Add relevance_score column to raw_observations (migration 22)
+   * Scores range 0.0-1.0, used for smart cleanup and context injection prioritization.
+   */
+  private addRelevanceScoreColumn(): void {
+    const applied = this.db.prepare('SELECT 1 FROM schema_versions WHERE version = 22').get();
+    if (applied) return;
+
+    // Check if column already exists
+    const columns = this.db.prepare('PRAGMA table_info(raw_observations)').all() as TableColumnInfo[];
+    const hasColumn = columns.some(c => c.name === 'relevance_score');
+
+    if (!hasColumn) {
+      this.db.run('ALTER TABLE raw_observations ADD COLUMN relevance_score REAL DEFAULT 0.5');
+      this.db.run('CREATE INDEX IF NOT EXISTS idx_raw_obs_relevance ON raw_observations(relevance_score DESC)');
+      logger.debug('DB', 'Added relevance_score column to raw_observations');
+    }
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(22, new Date().toISOString());
+  }
+
+  /**
+   * Add privacy columns (migration 23)
+   * - sdk_sessions.privacy_suppressed: flag to suppress storage for current prompt
+   * - raw_observations.redacted: marks observations with redacted sensitive content
+   */
+  private addPrivacyColumns(): void {
+    const applied = this.db.prepare('SELECT 1 FROM schema_versions WHERE version = 23').get();
+    if (applied) return;
+
+    const sessionCols = this.db.prepare('PRAGMA table_info(sdk_sessions)').all() as TableColumnInfo[];
+    if (!sessionCols.some(c => c.name === 'privacy_suppressed')) {
+      this.db.run('ALTER TABLE sdk_sessions ADD COLUMN privacy_suppressed INTEGER DEFAULT 0');
+      logger.debug('DB', 'Added privacy_suppressed column to sdk_sessions');
+    }
+
+    const obsCols = this.db.prepare('PRAGMA table_info(raw_observations)').all() as TableColumnInfo[];
+    if (!obsCols.some(c => c.name === 'redacted')) {
+      this.db.run('ALTER TABLE raw_observations ADD COLUMN redacted INTEGER DEFAULT 0');
+      logger.debug('DB', 'Added redacted column to raw_observations');
+    }
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(23, new Date().toISOString());
+  }
+
+  /**
+   * Create consolidated_sessions table (migration 24)
+   * Stores compressed summaries of old sessions after their raw observations are deleted.
+   */
+  private createConsolidatedSessionsTable(): void {
+    const applied = this.db.prepare('SELECT 1 FROM schema_versions WHERE version = 24').get();
+    if (applied) return;
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS consolidated_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT NOT NULL,
+        project TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        prompt_count INTEGER,
+        tool_use_count INTEGER,
+        files_touched TEXT,
+        commands_run TEXT,
+        original_started_at TEXT,
+        original_started_at_epoch INTEGER NOT NULL,
+        consolidated_at TEXT NOT NULL,
+        consolidated_at_epoch INTEGER NOT NULL
+      )
+    `);
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_consolidated_project ON consolidated_sessions(project)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_consolidated_epoch ON consolidated_sessions(original_started_at_epoch DESC)');
+
+    logger.debug('DB', 'consolidated_sessions table created');
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(24, new Date().toISOString());
   }
 }

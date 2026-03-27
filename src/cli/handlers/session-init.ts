@@ -10,6 +10,7 @@ import type { EventHandler, NormalizedHookInput, HookResult } from '../types.js'
 import { openDatabase } from '../../services/sqlite/DirectDB.js';
 import { getProjectName } from '../../utils/project-name.js';
 import { logger } from '../../utils/logger.js';
+import { isPrivatePrompt } from '../../utils/privacy.js';
 
 export const sessionInitHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
@@ -26,6 +27,8 @@ export const sessionInitHandler: EventHandler = {
     const db = openDatabase();
 
     try {
+      const isPrivate = isPrivatePrompt(prompt);
+
       // Atomic transaction: create session + increment counter + store prompt
       const initSession = db.transaction(() => {
         // Create session if it doesn't exist
@@ -35,11 +38,10 @@ export const sessionInitHandler: EventHandler = {
           [sessionId, project, nowIso, nowEpoch]
         );
 
-        // Atomically increment and return new value via UPDATE ... RETURNING
-        // Fallback: UPDATE then SELECT (bun:sqlite RETURNING support varies)
+        // Set or clear privacy suppression flag
         db.run(
-          'UPDATE sdk_sessions SET prompt_counter = prompt_counter + 1 WHERE content_session_id = ?',
-          [sessionId]
+          'UPDATE sdk_sessions SET prompt_counter = prompt_counter + 1, privacy_suppressed = ? WHERE content_session_id = ?',
+          [isPrivate ? 1 : 0, sessionId]
         );
         const session = db.prepare(
           'SELECT id, prompt_counter FROM sdk_sessions WHERE content_session_id = ?'
@@ -47,11 +49,12 @@ export const sessionInitHandler: EventHandler = {
 
         const promptNumber = session.prompt_counter;
 
-        // Store the user prompt
+        // Store the user prompt (redacted if private)
+        const promptText = isPrivate ? '[PRIVATE - prompt not stored]' : prompt;
         db.run(
           `INSERT INTO user_prompts (content_session_id, prompt_number, prompt_text, created_at, created_at_epoch)
            VALUES (?, ?, ?, ?, ?)`,
-          [sessionId, promptNumber, prompt, nowIso, nowEpoch]
+          [sessionId, promptNumber, promptText, nowIso, nowEpoch]
         );
 
         return { sessionDbId: session.id, promptNumber };

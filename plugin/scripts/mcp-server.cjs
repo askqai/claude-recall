@@ -21131,6 +21131,9 @@ var MigrationRunner = class {
     this.repairSessionIdColumnRename();
     this.addFailedAtEpochColumn();
     this.addRawObservationsTable();
+    this.addRelevanceScoreColumn();
+    this.addPrivacyColumns();
+    this.createConsolidatedSessionsTable();
   }
   /**
    * Initialize database schema using migrations (migration004)
@@ -21629,6 +21632,70 @@ var MigrationRunner = class {
     this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(21, (/* @__PURE__ */ new Date()).toISOString());
     logger.debug("DB", "raw_observations table created successfully");
   }
+  /**
+   * Add relevance_score column to raw_observations (migration 22)
+   * Scores range 0.0-1.0, used for smart cleanup and context injection prioritization.
+   */
+  addRelevanceScoreColumn() {
+    const applied = this.db.prepare("SELECT 1 FROM schema_versions WHERE version = 22").get();
+    if (applied) return;
+    const columns = this.db.prepare("PRAGMA table_info(raw_observations)").all();
+    const hasColumn = columns.some((c) => c.name === "relevance_score");
+    if (!hasColumn) {
+      this.db.run("ALTER TABLE raw_observations ADD COLUMN relevance_score REAL DEFAULT 0.5");
+      this.db.run("CREATE INDEX IF NOT EXISTS idx_raw_obs_relevance ON raw_observations(relevance_score DESC)");
+      logger.debug("DB", "Added relevance_score column to raw_observations");
+    }
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(22, (/* @__PURE__ */ new Date()).toISOString());
+  }
+  /**
+   * Add privacy columns (migration 23)
+   * - sdk_sessions.privacy_suppressed: flag to suppress storage for current prompt
+   * - raw_observations.redacted: marks observations with redacted sensitive content
+   */
+  addPrivacyColumns() {
+    const applied = this.db.prepare("SELECT 1 FROM schema_versions WHERE version = 23").get();
+    if (applied) return;
+    const sessionCols = this.db.prepare("PRAGMA table_info(sdk_sessions)").all();
+    if (!sessionCols.some((c) => c.name === "privacy_suppressed")) {
+      this.db.run("ALTER TABLE sdk_sessions ADD COLUMN privacy_suppressed INTEGER DEFAULT 0");
+      logger.debug("DB", "Added privacy_suppressed column to sdk_sessions");
+    }
+    const obsCols = this.db.prepare("PRAGMA table_info(raw_observations)").all();
+    if (!obsCols.some((c) => c.name === "redacted")) {
+      this.db.run("ALTER TABLE raw_observations ADD COLUMN redacted INTEGER DEFAULT 0");
+      logger.debug("DB", "Added redacted column to raw_observations");
+    }
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(23, (/* @__PURE__ */ new Date()).toISOString());
+  }
+  /**
+   * Create consolidated_sessions table (migration 24)
+   * Stores compressed summaries of old sessions after their raw observations are deleted.
+   */
+  createConsolidatedSessionsTable() {
+    const applied = this.db.prepare("SELECT 1 FROM schema_versions WHERE version = 24").get();
+    if (applied) return;
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS consolidated_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT NOT NULL,
+        project TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        prompt_count INTEGER,
+        tool_use_count INTEGER,
+        files_touched TEXT,
+        commands_run TEXT,
+        original_started_at TEXT,
+        original_started_at_epoch INTEGER NOT NULL,
+        consolidated_at TEXT NOT NULL,
+        consolidated_at_epoch INTEGER NOT NULL
+      )
+    `);
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_consolidated_project ON consolidated_sessions(project)");
+    this.db.run("CREATE INDEX IF NOT EXISTS idx_consolidated_epoch ON consolidated_sessions(original_started_at_epoch DESC)");
+    logger.debug("DB", "consolidated_sessions table created");
+    this.db.prepare("INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)").run(24, (/* @__PURE__ */ new Date()).toISOString());
+  }
 };
 
 // src/services/sqlite/DirectDB.ts
@@ -21681,7 +21748,7 @@ function finalizeAllStatements() {
 function handleSearch(args) {
   const query = args.query || "";
   const limit = Math.min(Number(args.limit) || 20, 100);
-  const project = args.project;
+  const project = args.cross_project ? void 0 : args.project;
   const offset = Number(args.offset) || 0;
   const results = [];
   if (query.trim()) {
@@ -21792,9 +21859,34 @@ function handleSearch(args) {
     }
   } catch {
   }
+  try {
+    if (query.trim()) {
+      const likePattern = `%${query}%`;
+      if (project) {
+        const consolidatedResults = cachedPrepare(
+          `SELECT id, 'consolidated' as source, content_session_id, project, NULL as tool_name,
+                  NULL as title, NULL as type, original_started_at as created_at, original_started_at_epoch as created_at_epoch
+           FROM consolidated_sessions
+           WHERE summary LIKE ? AND project = ?
+           ORDER BY original_started_at_epoch DESC LIMIT ?`
+        ).all(likePattern, project, Math.floor(limit / 4));
+        results.push(...consolidatedResults);
+      } else {
+        const consolidatedResults = cachedPrepare(
+          `SELECT id, 'consolidated' as source, content_session_id, project, NULL as tool_name,
+                  NULL as title, NULL as type, original_started_at as created_at, original_started_at_epoch as created_at_epoch
+           FROM consolidated_sessions
+           WHERE summary LIKE ?
+           ORDER BY original_started_at_epoch DESC LIMIT ?`
+        ).all(likePattern, Math.floor(limit / 4));
+        results.push(...consolidatedResults);
+      }
+    }
+  } catch {
+  }
   results.sort((a, b) => b.created_at_epoch - a.created_at_epoch);
   const lines = results.slice(0, limit).map((r) => {
-    const source = r.source === "raw" ? "R" : "L";
+    const source = r.source === "raw" ? "R" : r.source === "consolidated" ? "C" : "L";
     const tool = r.tool_name || r.type || "";
     const title = r.title || "";
     return `[${source}:${r.id}] ${r.created_at} | ${r.project} | ${tool} ${title}`.trim();
@@ -21806,7 +21898,7 @@ function handleSearch(args) {
 
 ${lines.join("\n")}
 
-Use get_observations(ids=[...]) for full details. R=raw, L=legacy.` : "No results found."
+Use get_observations(ids=[...]) for full details. R=raw, L=legacy, C=consolidated.` : "No results found."
     }]
   };
 }
@@ -21859,6 +21951,7 @@ function handleTimeline(args) {
 function parseIds(ids) {
   const rawIds = [];
   const legacyIds = [];
+  const consolidatedIds = [];
   for (const id of ids) {
     const s = String(id).trim();
     if (s.startsWith("R:") || s.startsWith("r:")) {
@@ -21867,6 +21960,9 @@ function parseIds(ids) {
     } else if (s.startsWith("L:") || s.startsWith("l:")) {
       const num = Number(s.slice(2));
       if (!isNaN(num) && num > 0) legacyIds.push(num);
+    } else if (s.startsWith("C:") || s.startsWith("c:")) {
+      const num = Number(s.slice(2));
+      if (!isNaN(num) && num > 0) consolidatedIds.push(num);
     } else {
       const num = Number(s);
       if (!isNaN(num) && num > 0) {
@@ -21875,14 +21971,14 @@ function parseIds(ids) {
       }
     }
   }
-  return { rawIds: rawIds.slice(0, 50), legacyIds: legacyIds.slice(0, 50) };
+  return { rawIds: rawIds.slice(0, 50), legacyIds: legacyIds.slice(0, 50), consolidatedIds: consolidatedIds.slice(0, 50) };
 }
 function handleGetObservations(args) {
   const ids = args.ids;
   if (!ids || ids.length === 0) {
     return { content: [{ type: "text", text: "Error: ids array is required" }] };
   }
-  const { rawIds, legacyIds } = parseIds(ids);
+  const { rawIds, legacyIds, consolidatedIds } = parseIds(ids);
   const results = [];
   if (rawIds.length > 0) {
     const rawPlaceholders = rawIds.map(() => "?").join(",");
@@ -21928,6 +22024,30 @@ function handleGetObservations(args) {
     } catch {
     }
   }
+  if (consolidatedIds.length > 0) {
+    try {
+      const cPlaceholders = consolidatedIds.map(() => "?").join(",");
+      const cRows = db.prepare(
+        `SELECT * FROM consolidated_sessions WHERE id IN (${cPlaceholders}) ORDER BY original_started_at_epoch DESC`
+      ).all(...consolidatedIds);
+      for (const r of cRows) {
+        results.push({
+          source: "consolidated",
+          id: r.id,
+          session: r.content_session_id,
+          project: r.project,
+          summary: r.summary,
+          prompt_count: r.prompt_count,
+          tool_use_count: r.tool_use_count,
+          files_touched: r.files_touched,
+          commands_run: r.commands_run,
+          original_started_at: r.original_started_at,
+          consolidated_at: r.consolidated_at
+        });
+      }
+    } catch {
+    }
+  }
   return {
     content: [{
       type: "text",
@@ -21937,6 +22057,80 @@ function handleGetObservations(args) {
 }
 function truncate(s, maxLen) {
   return s.length > maxLen ? s.slice(0, maxLen) + "...[truncated]" : s;
+}
+function handleForget(args) {
+  const query = args.query;
+  const ids = args.ids;
+  const confirm = args.confirm === true;
+  if (!query && (!ids || ids.length === 0)) {
+    return { content: [{ type: "text", text: "Error: provide either query or ids to identify observations to forget." }] };
+  }
+  let rawIdsToDelete = [];
+  if (ids && ids.length > 0) {
+    const parsed = parseIds(ids);
+    rawIdsToDelete = parsed.rawIds;
+    if (confirm && parsed.legacyIds.length > 0) {
+      const legacyPlaceholders = parsed.legacyIds.map(() => "?").join(",");
+      try {
+        db.run(`DELETE FROM observations WHERE id IN (${legacyPlaceholders})`, ...parsed.legacyIds);
+      } catch {
+      }
+    }
+  } else if (query) {
+    const ftsQuery = query.split(/\s+/).map((term) => `"${term.replace(/"/g, "")}"`).join(" ");
+    try {
+      const rows = db.prepare(
+        `SELECT r.id FROM raw_observations r
+         JOIN raw_observations_fts f ON r.id = f.rowid
+         WHERE raw_observations_fts MATCH ?
+         ORDER BY r.created_at_epoch DESC LIMIT 100`
+      ).all(ftsQuery);
+      rawIdsToDelete = rows.map((r) => r.id);
+    } catch {
+      const likePattern = `%${query}%`;
+      const rows = db.prepare(
+        `SELECT id FROM raw_observations
+         WHERE tool_name LIKE ? OR tool_input LIKE ?
+         ORDER BY created_at_epoch DESC LIMIT 100`
+      ).all(likePattern, likePattern);
+      rawIdsToDelete = rows.map((r) => r.id);
+    }
+  }
+  if (rawIdsToDelete.length === 0) {
+    return { content: [{ type: "text", text: "No matching observations found." }] };
+  }
+  if (!confirm) {
+    const sample = rawIdsToDelete.slice(0, 5);
+    const sampleRows = sample.map((id) => {
+      const row = db.prepare("SELECT id, tool_name, created_at FROM raw_observations WHERE id = ?").get(id);
+      return row ? `[R:${row.id}] ${row.created_at} | ${row.tool_name}` : `[R:${id}] (not found)`;
+    });
+    return {
+      content: [{
+        type: "text",
+        text: `Would delete ${rawIdsToDelete.length} observations. Sample:
+${sampleRows.join("\n")}
+
+Call forget() again with confirm=true to delete.`
+      }]
+    };
+  }
+  const placeholders = rawIdsToDelete.map(() => "?").join(",");
+  const result = db.run(`DELETE FROM raw_observations WHERE id IN (${placeholders})`, ...rawIdsToDelete);
+  let consolidatedDeleted = 0;
+  if (query) {
+    try {
+      const cResult = db.run(`DELETE FROM consolidated_sessions WHERE summary LIKE ?`, `%${query}%`);
+      consolidatedDeleted = cResult.changes;
+    } catch {
+    }
+  }
+  return {
+    content: [{
+      type: "text",
+      text: `Deleted ${result.changes} raw observations${consolidatedDeleted > 0 ? ` and ${consolidatedDeleted} consolidated sessions` : ""}. These memories have been permanently removed.`
+    }]
+  };
 }
 var tools = [
   {
@@ -21970,20 +22164,21 @@ NEVER fetch full details without filtering first. 10x token savings.`,
    Returns: Complete details (~500-1000 tokens/result)
 
 **Why:** 10x token savings. Never fetch full details without filtering first.
-Prefix R: = raw observations, L: = legacy observations.`
+Prefix R: = raw observations, L: = legacy observations, C: = consolidated sessions.`
       }]
     })
   },
   {
     name: "search",
-    description: "Step 1: Search memory. Returns index with IDs. Params: query, limit, project, offset",
+    description: "Step 1: Search memory. Returns index with IDs. Params: query, limit, project, offset, cross_project",
     inputSchema: {
       type: "object",
       properties: {
         query: { type: "string", description: "Search query (FTS5 for raw observations, LIKE for legacy)" },
         limit: { type: "number", description: "Max results (default 20, max 100)" },
         project: { type: "string", description: "Filter by project name" },
-        offset: { type: "number", description: "Pagination offset" }
+        offset: { type: "number", description: "Pagination offset" },
+        cross_project: { type: "boolean", description: "Search across all projects (ignores project filter)" }
       },
       additionalProperties: true
     },
@@ -22022,6 +22217,24 @@ Prefix R: = raw observations, L: = legacy observations.`
       additionalProperties: true
     },
     handler: async (args) => handleGetObservations(args)
+  },
+  {
+    name: "forget",
+    description: "Delete observations matching a query or specific IDs. Use to remove sensitive or unwanted memories. Requires confirm=true to actually delete.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query to find observations to delete" },
+        ids: {
+          type: "array",
+          items: { oneOf: [{ type: "number" }, { type: "string" }] },
+          description: "Specific IDs to delete (R:1, L:5)"
+        },
+        confirm: { type: "boolean", description: "Must be true to actually delete. Without it, shows what would be deleted." }
+      },
+      additionalProperties: true
+    },
+    handler: async (args) => handleForget(args)
   }
 ];
 var server = new Server(

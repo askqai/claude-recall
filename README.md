@@ -4,50 +4,206 @@ Persistent memory system for [Claude Code](https://claude.com/claude-code). Auto
 
 All data stays local in a single SQLite database. No background daemons, no network services, no subprocess spawning.
 
+**Inspired by [thedotmack/claude-mem](https://github.com/thedotmack/claude-mem)** — rebuilt from the ground up with a zero-daemon, lightweight-first philosophy.
+
+## What Makes This Different
+
+| Feature | claude-recall | claude-mem | Others |
+|---------|:---:|:---:|:---:|
+| Zero background daemons | Yes | No (Express server) | Varies |
+| No Python/Chroma required | Yes | No | Varies |
+| Direct SQLite (WAL mode) | Yes | HTTP proxy | Varies |
+| Smart relevance scoring | Yes | No | No |
+| Auto-redaction of secrets | Yes | No | No |
+| Privacy suppression tags | Yes | Partial | No |
+| Memory consolidation/decay | Yes | No | No |
+| Cross-project search | Yes | No | No |
+| Token-efficient 3-layer search | Yes | Yes | No |
+| Single dependency (MCP SDK) | Yes | No (15+ deps) | Varies |
+
 ## Architecture
 
 ```
-Hook (SessionStart)     → Reads SQLite → Injects context into new session
-Hook (UserPromptSubmit) → Writes SQLite → Records session + user prompt
-Hook (PostToolUse)      → Writes SQLite → Records tool name, input, response
-Hook (Stop)             → No-op
-Hook (SessionEnd)       → Writes SQLite → Marks session completed
-
-MCP Server (stdio)      → Reads SQLite → search / timeline / get_observations
+┌─────────────────────────────────────────────────────────────────────┐
+│ Claude Code                                                         │
+│                                                                     │
+│  Hook (SessionStart)      → Reads SQLite  → Injects context        │
+│  Hook (UserPromptSubmit)  → Writes SQLite → Records session+prompt  │
+│  Hook (PostToolUse)       → Writes SQLite → Records tool use        │
+│  Hook (Stop)              → Reads transcript → Captures responses   │
+│  Hook (SessionEnd)        → Writes SQLite → Marks session done      │
+│                                                                     │
+│  MCP Server (stdio)       → Reads SQLite  → search/timeline/forget  │
+└─────────────────────────────────────────────────────────────────────┘
+         │                           │
+         ▼                           ▼
+┌─────────────────┐    ┌──────────────────────────┐
+│ bun:sqlite (WAL) │    │ ~/.claude-recall/         │
+│ Direct access    │───▶│   claude-recall.db        │
+│ No HTTP proxy    │    │   logs/                   │
+└─────────────────┘    └──────────────────────────┘
 ```
 
 There is no background worker, no HTTP server, no AI-powered compression. Hooks write directly to SQLite via `bun:sqlite` in WAL mode. The MCP server is launched by Claude Code on demand via stdio transport.
+
+## Features
+
+### 1. Smart Selective Capture
+
+Every tool use is scored for relevance (0.0–1.0) before storage:
+
+| Score | What triggers it |
+|-------|-----------------|
+| 0.8–0.9 | Write/Edit operations, Bash errors, tool uses following bug/fix/architecture prompts |
+| 0.5 | Standard reads, successful Bash commands (default) |
+| 0.1–0.2 | Config file reads (package.json, tsconfig), empty search results, node_modules, duplicate reads |
+| 0.0 | Internal bookkeeping (_assistant_responses) |
+
+Relevance scores drive cleanup priority — low-signal observations are deleted first when the database exceeds 10GB.
+
+### 2. Privacy & Security
+
+**Suppression tags** — Include `<private>` or `<no-recall>` in any prompt to suppress storage for that prompt and all subsequent tool uses until the next prompt:
+```
+<private> Show me the API keys in .env
+```
+Nothing from that interaction is stored.
+
+**Auto-redaction** — Sensitive patterns are automatically detected and replaced with `[REDACTED:label]` before storage:
+
+| Pattern | Example |
+|---------|---------|
+| API keys | `api_key=sk_live_abc123...` → `[REDACTED:API_KEY]` |
+| Bearer tokens | `Bearer eyJhbGci...` → `[REDACTED:BEARER_TOKEN]` |
+| AWS keys | `AKIAIOSFODNN7...` → `[REDACTED:AWS_KEY]` |
+| Private keys | `-----BEGIN RSA PRIVATE KEY-----` → `[REDACTED:PRIVATE_KEY]` |
+| Passwords | `password="hunter2"` → `[REDACTED:PASSWORD]` |
+| GitHub tokens | `ghp_xxxx...` → `[REDACTED:GITHUB_TOKEN]` |
+| OpenAI keys | `sk-xxxx...` → `[REDACTED:OPENAI_KEY]` |
+| Slack tokens | `xoxb-xxxx...` → `[REDACTED:SLACK_TOKEN]` |
+
+**Retroactive deletion** — The `forget` MCP tool deletes matching observations:
+```
+forget(query="credentials", confirm=false)   # dry run — shows what would be deleted
+forget(query="credentials", confirm=true)    # actually deletes
+forget(ids=["R:42", "R:43"], confirm=true)   # delete specific observations
+```
+
+### 3. Memory Decay & Consolidation
+
+Memory lifecycle is managed automatically based on **session count, not time** — so a project you pause for weeks keeps full history until you push it out with new sessions:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ Layer 1: Consolidation (count-based, per project)                   │
+│   Keep last 20 sessions with full raw detail per project            │
+│   Session 21+ → compressed into ~500 char summaries                 │
+│   Raw observations and user prompts deleted                         │
+│                                                                     │
+│ Layer 2: Decay (time-based)                                         │
+│   Observations > 90 days → relevance scores halved (floor at 0.05)  │
+│   Idempotent — scores converge toward floor over repeated runs      │
+│                                                                     │
+│ Layer 3: Hard Size Limit (safety net — always enforced)             │
+│   DB > 10GB → delete lowest-relevance observations first            │
+│   Fires regardless of consolidation or decay state                  │
+│   Catches runaway sessions, unclosed sessions, edge cases           │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Why count-based, not time-based?** If you pause a project for 3 weeks and come back, all your sessions are still there with full raw detail. Consolidation only kicks in when you create session #21 for that project — time alone never triggers data loss.
+
+**Why a hard 10GB limit?** Sessions can grow large, stay unclosed, or accumulate across many projects. The 10GB cap is the safety net that always fires, deleting lowest-relevance observations first regardless of age or session count.
+
+All three layers run probabilistically (1% of PostToolUse invocations) to avoid overhead.
+
+### 4. Cross-Project Search
+
+Search across all projects with the MCP `search` tool:
+```
+search(query="auth middleware", cross_project=true)
+```
+
+By default, context injection and search are scoped to the current project (derived from the working directory). Cross-project is opt-in only.
+
+### 5. Context Injection
+
+When a new session starts, a compact summary (~2K tokens) is injected:
+
+```markdown
+# Previous Session — my-app
+Status: completed | Started: 2026-03-27T14:30:00Z | 5 prompts, 23 tool uses
+Use MCP tools (search, timeline, get_observations) for full details.
+
+## Prompt 1
+> Fix the authentication timeout bug in the login flow
+
+**Claude:** The issue was in src/auth/middleware.ts where the JWT expiry...
+
+### Files touched (8):
+- src/auth/middleware.ts
+- src/auth/jwt.ts
+...
+
+### Commands run (3):
+- `npm test`
+- `git diff`
+...
+
+## Older Sessions (consolidated)
+- **2026-03-20** (12p/45t): P1: Refactor database connection pooling...
+```
+
+Full detail is always available on-demand via MCP tools — the injection is intentionally compact.
 
 ## Installation
 
 ### Prerequisites
 
-- **Bun** >= 1.0 (required for `bun:sqlite`)
-- **Claude Code** with hooks support
-- **Node.js** >= 18 (for the build step only)
+| Dependency | Version | Why |
+|-----------|---------|-----|
+| **Bun** | >= 1.0 | Runtime for hooks and MCP server (`bun:sqlite`) |
+| **Node.js** | >= 18 | Build step only (esbuild) |
+| **Claude Code** | Latest | With hooks support |
 
-Install Bun if not already installed:
+### Step 1: Install Bun (if not already installed)
+
 ```bash
 curl -fsSL https://bun.sh/install | bash
 ```
 
-### Build
+Verify it's working:
+```bash
+bun --version
+```
+
+### Step 2: Clone and Build
 
 ```bash
-cd /Users/richardchow/Code/claude-recall-new
+git clone https://github.com/askqai/claude-recall.git
+cd claude-recall
 npm install
 node scripts/build-hooks.js
 ```
 
-This produces four bundles in `plugin/scripts/`:
-- `hook-command.js` — ESM entry point for all hooks
-- `mcp-server.cjs` — MCP server (stdio transport)
-- `worker-service.cjs` — Legacy, not used
-- `context-generator.cjs` — Legacy, not used
+You should see:
+```
+  ✓ hook-command.js
+  ✓ mcp-server.cjs
+Build complete
+```
 
-### Deploy
+Note the **absolute path** to your clone — you'll need it in the next steps:
+```bash
+pwd
+# Example output: /Users/you/Code/claude-recall
+```
 
-**1. Hooks** — Add to `~/.claude/settings.json`:
+### Step 3: Configure Claude Code Hooks
+
+Open (or create) `~/.claude/settings.json` and add the hooks configuration.
+
+Replace `/absolute/path/to/claude-recall` below with the output from `pwd` in Step 2:
 
 ```json
 {
@@ -58,7 +214,7 @@ This produces four bundles in `plugin/scripts/`:
         "hooks": [
           {
             "type": "command",
-            "command": "\"/Users/richardchow/Code/claude-recall-new/plugin/scripts/bun-runner.sh\" \"/Users/richardchow/Code/claude-recall-new/plugin/scripts/hook-command.js\" claude-code context",
+            "command": "\"/absolute/path/to/claude-recall/plugin/scripts/bun-runner.sh\" \"/absolute/path/to/claude-recall/plugin/scripts/hook-command.js\" claude-code context",
             "timeout": 10
           }
         ]
@@ -69,7 +225,7 @@ This produces four bundles in `plugin/scripts/`:
         "hooks": [
           {
             "type": "command",
-            "command": "\"/Users/richardchow/Code/claude-recall-new/plugin/scripts/bun-runner.sh\" \"/Users/richardchow/Code/claude-recall-new/plugin/scripts/hook-command.js\" claude-code session-init",
+            "command": "\"/absolute/path/to/claude-recall/plugin/scripts/bun-runner.sh\" \"/absolute/path/to/claude-recall/plugin/scripts/hook-command.js\" claude-code session-init",
             "timeout": 5
           }
         ]
@@ -81,7 +237,7 @@ This produces four bundles in `plugin/scripts/`:
         "hooks": [
           {
             "type": "command",
-            "command": "\"/Users/richardchow/Code/claude-recall-new/plugin/scripts/bun-runner.sh\" \"/Users/richardchow/Code/claude-recall-new/plugin/scripts/hook-command.js\" claude-code observation",
+            "command": "\"/absolute/path/to/claude-recall/plugin/scripts/bun-runner.sh\" \"/absolute/path/to/claude-recall/plugin/scripts/hook-command.js\" claude-code observation",
             "timeout": 5
           }
         ]
@@ -92,7 +248,7 @@ This produces four bundles in `plugin/scripts/`:
         "hooks": [
           {
             "type": "command",
-            "command": "\"/Users/richardchow/Code/claude-recall-new/plugin/scripts/bun-runner.sh\" \"/Users/richardchow/Code/claude-recall-new/plugin/scripts/hook-command.js\" claude-code summarize",
+            "command": "\"/absolute/path/to/claude-recall/plugin/scripts/bun-runner.sh\" \"/absolute/path/to/claude-recall/plugin/scripts/hook-command.js\" claude-code summarize",
             "timeout": 5
           }
         ]
@@ -103,7 +259,7 @@ This produces four bundles in `plugin/scripts/`:
         "hooks": [
           {
             "type": "command",
-            "command": "\"/Users/richardchow/Code/claude-recall-new/plugin/scripts/bun-runner.sh\" \"/Users/richardchow/Code/claude-recall-new/plugin/scripts/hook-command.js\" claude-code session-end",
+            "command": "\"/absolute/path/to/claude-recall/plugin/scripts/bun-runner.sh\" \"/absolute/path/to/claude-recall/plugin/scripts/hook-command.js\" claude-code session-end",
             "timeout": 5
           }
         ]
@@ -113,21 +269,55 @@ This produces four bundles in `plugin/scripts/`:
 }
 ```
 
-**2. MCP Server** — Add to `~/.claude.json` under `mcpServers`:
+> **Tip:** If you already have a `settings.json` with other hooks, merge the hook arrays — don't replace the entire file.
+
+### Step 4: Configure the MCP Server
+
+Open (or create) `~/.claude.json` and add the MCP server:
 
 ```json
 {
   "mcpServers": {
     "claude-recall": {
       "type": "stdio",
-      "command": "/Users/richardchow/Code/claude-recall-new/plugin/scripts/bun-runner.sh",
-      "args": ["/Users/richardchow/Code/claude-recall-new/plugin/scripts/mcp-server.cjs"]
+      "command": "/absolute/path/to/claude-recall/plugin/scripts/bun-runner.sh",
+      "args": ["/absolute/path/to/claude-recall/plugin/scripts/mcp-server.cjs"]
     }
   }
 }
 ```
 
-**3. Restart Claude Code** — Existing sessions must be restarted to pick up hook and MCP changes.
+> **Note:** `~/.claude.json` is the **global** Claude Code config (not the per-project `.claude/settings.json`). If the file doesn't exist, create it with the JSON above.
+
+### Step 5: Restart Claude Code
+
+Close and reopen Claude Code (or start a new session). You should see the previous session summary injected at the start of your conversation.
+
+### Verify Installation
+
+```bash
+# Check the database was created
+ls -la ~/.claude-recall/claude-recall.db
+
+# Check recent observations are being stored
+sqlite3 ~/.claude-recall/claude-recall.db "SELECT COUNT(*) FROM raw_observations;"
+
+# Check sessions are tracked
+sqlite3 ~/.claude-recall/claude-recall.db "SELECT project, status, prompt_counter FROM sdk_sessions ORDER BY rowid DESC LIMIT 5;"
+```
+
+### Quick Test
+
+Test the hook manually to confirm everything is wired up:
+```bash
+echo '{"session_id":"test","tool_name":"Read","tool_input":{"file_path":"/tmp/test"},"tool_response":"ok","cwd":"/tmp"}' | \
+  bun /path/to/claude-recall/plugin/scripts/hook-command.js claude-code observation
+```
+
+Expected output:
+```json
+{"continue":true,"suppressOutput":true}
+```
 
 ## How It Works
 
@@ -135,92 +325,122 @@ This produces four bundles in `plugin/scripts/`:
 
 | Hook | Event | What It Does |
 |------|-------|-------------|
-| `SessionStart` | New session opens | Queries recent sessions and observations from SQLite, formats as markdown, injects as context (~4000 tokens max) |
-| `UserPromptSubmit` | User sends a prompt | Creates/updates session in `sdk_sessions`, increments prompt counter, stores prompt text in `user_prompts` |
-| `PostToolUse` | Any tool completes | Inserts tool name, input (capped 10KB), response (capped 10KB) into `raw_observations` |
-| `Stop` | Claude stops responding | No-op (raw observations already capture everything) |
+| `SessionStart` | New session opens | Queries recent sessions from SQLite, builds compact summary (~2K tokens), injects as context |
+| `UserPromptSubmit` | User sends a prompt | Creates/updates session, increments prompt counter, stores prompt (checks privacy tags) |
+| `PostToolUse` | Any tool completes | Scores relevance, redacts secrets, stores observation. 1% chance: runs consolidation + decay + cleanup |
+| `Stop` | Claude stops responding | Reads conversation transcript, extracts assistant responses, stores as `_assistant_responses` |
 | `SessionEnd` | Session exits | Marks session status as `completed` |
 
-### Context Injection (SessionStart)
+### Observation Pipeline
 
-When a new session starts, the context handler:
+```
+PostToolUse fires
+    │
+    ▼
+Check privacy_suppressed flag ──── Yes ──→ Skip (return early)
+    │ No
+    ▼
+Truncate payloads (10KB cap)
+    │
+    ▼
+Detect & redact sensitive patterns
+    │
+    ▼
+Query recent tools (last 5) for dedup
+    │
+    ▼
+Compute relevance score (0.0-1.0)
+    │
+    ▼
+INSERT into raw_observations
+    │
+    ▼
+1% chance: consolidate + decay + cleanup
+```
 
-1. Queries the 5 most recent sessions from `sdk_sessions`
-2. For each session, fetches associated `raw_observations` and `user_prompts`
-3. Groups observations by session, allocates 60% of budget to the most recent session
-4. Applies tool-specific formatters:
-   - **Read/Write/Edit** — shows file path
-   - **Bash** — shows command + truncated output
-   - **Glob/Grep** — shows search pattern
-5. Returns formatted markdown as `hookSpecificOutput.additionalContext`
+### Relevance Scoring Logic
 
-Max context size: 16,000 characters (~4,000 tokens).
+The scoring system uses simple heuristics — no ML, no API calls:
 
-### Observation Storage (PostToolUse)
+- **Tool type**: Write/Edit score higher than Read. Bash errors score higher than successes.
+- **Content analysis**: Config files (package.json, tsconfig) score low. Code files score normal.
+- **Dedup detection**: Repeated reads of the same file within a session get penalized.
+- **Prompt context**: If the user's last prompt mentioned "bug", "fix", "architecture", etc., all subsequent tool uses get a +0.15 boost.
 
-Every tool invocation is captured with:
-- `tool_name` — Read, Write, Edit, Bash, Grep, Glob, etc.
-- `tool_input` — JSON of the tool's input parameters (capped at 10KB)
-- `tool_response` — The tool's output (capped at 10KB)
-- `content_session_id` — Links to the Claude Code session
-- `project` — Derived from working directory name
-- `cwd` — Full working directory path
-- `prompt_number` — Which prompt in the session triggered this tool use
+### Memory Consolidation
 
-### Session Separation
+When a project exceeds 20 completed sessions, the oldest sessions beyond that limit are compressed into the `consolidated_sessions` table:
 
-Each Claude Code session gets a unique `content_session_id`. Observations and prompts are tagged with this ID, so multiple concurrent sessions (even in the same project) are cleanly separated in the database. The `project` column (derived from the working directory basename) groups data by project for cross-session queries.
+1. Find projects with >20 completed sessions that have raw observations
+2. For sessions beyond the 20-session retention limit (oldest first):
+   - Build a compressed summary from prompts (~500 chars)
+   - Extract metadata: files touched, commands run, prompt/tool counts
+   - Store summary in `consolidated_sessions`
+   - Delete raw observations and user prompts for that session
+3. Process up to 5 sessions per invocation to stay within hook timeout
+
+This is count-based, not time-based — a project you haven't touched in weeks retains full detail until new sessions push older ones past the limit. The 10GB hard cap acts as an independent safety net regardless.
 
 ## MCP Tools
 
-The MCP server provides three tools following a 3-layer workflow for token-efficient retrieval:
+The MCP server provides five tools following a 3-layer workflow for token-efficient retrieval:
 
-### 1. `search` — Find observations
+### `search` — Find observations
 
 ```
 search(query="authentication bug", project="my-app", limit=20)
+search(query="database migration", cross_project=true)
 ```
 
 Returns a compact index with IDs:
 ```
-[R:42] 2026-02-06T10:30:00Z | my-app | Edit fix_auth.py
-[R:41] 2026-02-06T10:29:55Z | my-app | Bash pytest tests/
-[L:15] 2026-01-28T14:00:00Z | my-app | bug_fix Authentication timeout
+Found 23 results:
+
+[R:142] 2026-03-27T14:30:00Z | my-app | Edit src/auth/jwt.ts
+[R:140] 2026-03-27T14:25:30Z | my-app | Bash npm test
+[C:3] 2026-03-20T10:00:00Z | my-app | (consolidated session)
+[L:15] 2026-01-28T14:00:00Z | my-app | feature Add login flow
+
+Use get_observations(ids=[...]) for full details. R=raw, L=legacy, C=consolidated.
 ```
 
-- `R:` prefix = raw observation (new system)
-- `L:` prefix = legacy observation (old system)
-- Uses FTS5 full-text search on `tool_name` and `tool_input`
-- Falls back to LIKE search if FTS5 query syntax fails
-- Also searches legacy `observations` table
-
-### 2. `timeline` — Context around a result
+### `timeline` — Context around a result
 
 ```
-timeline(anchor=42, depth_before=3, depth_after=3, source="raw")
+timeline(anchor=142, depth_before=3, depth_after=3)
 ```
 
 Returns chronological context (hours before/after the anchor):
 ```
-[R:40] 2026-02-06T10:29:00Z | my-app | Read
-[R:41] 2026-02-06T10:29:55Z | my-app | Bash
-[R:42] >>> 2026-02-06T10:30:00Z | my-app | Edit    ← anchor
-[R:43] 2026-02-06T10:30:10Z | my-app | Bash
+[R:140] 2026-03-27T14:25:00Z | my-app | Read
+[R:141] 2026-03-27T14:29:55Z | my-app | Bash
+[R:142] >>> 2026-03-27T14:30:00Z | my-app | Edit    ← anchor
+[R:143] 2026-03-27T14:30:10Z | my-app | Bash
 ```
 
-### 3. `get_observations` — Full details
+### `get_observations` — Full details
 
 ```
-get_observations(ids=["R:42", "R:41", "L:15"])
+get_observations(ids=["R:142", "R:141", "C:3"])
 ```
 
-Returns complete records with tool input, response, cwd, etc. Accepts prefixed IDs (`R:` for raw, `L:` for legacy) or plain numbers (searches both tables).
+Returns complete records with tool input, response, cwd, etc. Accepts prefixed IDs:
+- `R:` — raw observations
+- `L:` — legacy observations
+- `C:` — consolidated sessions
+
+### `forget` — Delete observations
+
+```
+forget(query="api keys", confirm=false)    # preview what would be deleted
+forget(ids=["R:42"], confirm=true)         # delete specific observations
+```
 
 ### Recommended Workflow
 
 1. **Search** — Get index with IDs (~50-100 tokens per result)
 2. **Timeline** — Get surrounding context for interesting results
-3. **Get Observations** — Fetch full details only for filtered IDs (~500-1000 tokens per result)
+3. **Get Observations** — Fetch full details only for filtered IDs
 
 This 3-layer pattern provides ~10x token savings compared to fetching everything upfront.
 
@@ -243,12 +463,14 @@ CREATE TABLE raw_observations (
   content_session_id TEXT NOT NULL,
   project TEXT NOT NULL,
   tool_name TEXT NOT NULL,
-  tool_input TEXT,          -- JSON, capped at 10KB
-  tool_response TEXT,       -- capped at 10KB
+  tool_input TEXT,              -- JSON, capped at 10KB
+  tool_response TEXT,           -- capped at 10KB
   cwd TEXT,
   prompt_number INTEGER,
   created_at TEXT NOT NULL,
-  created_at_epoch INTEGER NOT NULL
+  created_at_epoch INTEGER NOT NULL,
+  relevance_score REAL DEFAULT 0.5,   -- 0.0-1.0, drives cleanup priority
+  redacted INTEGER DEFAULT 0          -- 1 if sensitive content was redacted
 );
 ```
 
@@ -258,8 +480,9 @@ CREATE TABLE sdk_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   content_session_id TEXT UNIQUE NOT NULL,
   project TEXT NOT NULL,
-  status TEXT DEFAULT 'active',  -- active | completed | failed
+  status TEXT DEFAULT 'active',         -- active | completed | failed
   prompt_counter INTEGER DEFAULT 0,
+  privacy_suppressed INTEGER DEFAULT 0, -- 1 = suppress storage for current prompt
   started_at TEXT NOT NULL,
   started_at_epoch INTEGER NOT NULL,
   completed_at TEXT,
@@ -273,9 +496,27 @@ CREATE TABLE user_prompts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   content_session_id TEXT NOT NULL,
   prompt_number INTEGER NOT NULL,
-  prompt_text TEXT NOT NULL,
+  prompt_text TEXT NOT NULL,         -- "[PRIVATE]" if privacy tag was used
   created_at TEXT NOT NULL,
   created_at_epoch INTEGER NOT NULL
+);
+```
+
+**`consolidated_sessions`** — Compressed summaries of old sessions:
+```sql
+CREATE TABLE consolidated_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  content_session_id TEXT NOT NULL,
+  project TEXT NOT NULL,
+  summary TEXT NOT NULL,             -- ~500 char compressed prompt history
+  prompt_count INTEGER,
+  tool_use_count INTEGER,
+  files_touched TEXT,                -- JSON array
+  commands_run TEXT,                 -- JSON array
+  original_started_at TEXT,
+  original_started_at_epoch INTEGER NOT NULL,
+  consolidated_at TEXT NOT NULL,
+  consolidated_at_epoch INTEGER NOT NULL
 );
 ```
 
@@ -289,14 +530,15 @@ Both `raw_observations` and `user_prompts` have FTS5 virtual tables with automat
 
 ### Storage Limits
 
-- **Max DB size:** 10 GB (enforced by page count check)
-- **Cleanup:** When the 10 GB limit is exceeded, the oldest 10% of `raw_observations` are deleted
-- **Cleanup frequency:** Probabilistic — runs on ~1% of PostToolUse invocations to avoid overhead
-- **Input/response cap:** 10 KB per field (larger payloads are truncated with `...[truncated]` marker)
+- **Max DB size:** 10 GB hard limit (enforced by page count check, always active)
+- **Consolidation:** Per project, keeps last 20 sessions with full detail; older ones compressed into summaries
+- **Decay:** Observations >90 days have relevance scores halved (floor at 0.05)
+- **Cleanup strategy:** When DB exceeds 10GB, deletes by lowest `relevance_score` first, then oldest
+- **Cleanup frequency:** All three layers run probabilistically on ~1% of PostToolUse invocations
+- **Input/response cap:** 10 KB per field (larger payloads truncated with `...[truncated]` marker)
 
 ### SQLite Configuration
 
-The database is opened with these pragmas:
 ```sql
 PRAGMA journal_mode = WAL;       -- Concurrent readers + single writer
 PRAGMA busy_timeout = 5000;      -- Wait 5s for locks instead of failing
@@ -305,67 +547,67 @@ PRAGMA foreign_keys = ON;
 PRAGMA temp_store = memory;
 ```
 
-WAL mode allows multiple Claude Code sessions to read simultaneously while one writes. Each hook opens a connection, performs its operation, and closes it. The MCP server keeps a persistent connection open.
+WAL mode allows multiple Claude Code sessions to read simultaneously while one writes.
 
 ## Project Structure
 
 ```
 src/
   cli/
-    hook-entry.ts          -- CLI entry point (parses argv, calls hookCommand)
-    hook-command.ts        -- Routes events to handlers
+    hook-entry.ts              -- CLI entry point (parses argv)
+    hook-command.ts            -- Routes events to handlers
+    stdin-reader.ts            -- Reads JSON from stdin
+    types.ts                   -- NormalizedHookInput, HookResult types
     handlers/
-      context.ts           -- SessionStart: context injection
-      session-init.ts      -- UserPromptSubmit: session + prompt storage
-      observation.ts       -- PostToolUse: raw observation storage
-      summarize.ts         -- Stop: no-op
-      session-end.ts       -- SessionEnd: mark session completed
+      context.ts               -- SessionStart: context injection + consolidated summaries
+      session-init.ts          -- UserPromptSubmit: session + prompt storage + privacy check
+      observation.ts           -- PostToolUse: relevance scoring + redaction + storage + maintenance
+      summarize.ts             -- Stop: transcript capture
+      session-end.ts           -- SessionEnd: mark session completed
+      relevance.ts             -- Relevance scoring heuristics (0.0-1.0)
+      user-message.ts          -- SessionStart: user notification via stderr
+      file-edit.ts             -- Cursor: afterFileEdit hook
     adapters/
-      claude-code.ts       -- Normalizes Claude Code hook input
-    types.ts               -- NormalizedHookInput types
-    stdin-reader.ts        -- Reads JSON from stdin
+      claude-code.ts           -- Normalizes Claude Code hook input
+      cursor.ts                -- Normalizes Cursor hook input
+      raw.ts                   -- Pass-through adapter
   servers/
-    mcp-server.ts          -- MCP server (stdio, direct SQLite)
+    mcp-server.ts              -- MCP server (search, timeline, get_observations, forget)
   services/
     sqlite/
-      DirectDB.ts          -- openDatabase() — thin wrapper for bun:sqlite
+      DirectDB.ts              -- openDatabase() — thin wrapper for bun:sqlite
       migrations/
-        runner.ts          -- Schema migrations (21 versions)
-  shared/
-    paths.ts               -- DB_PATH, DATA_DIR, LOG_DIR constants
+        runner.ts              -- Schema migrations (24 versions)
+    consolidation.ts           -- Session consolidation, time decay, smart cleanup
   utils/
-    logger.ts              -- File + stderr logger
-    project-name.ts        -- Derives project name from cwd
+    privacy.ts                 -- Private prompt detection, sensitive pattern redaction
+    logger.ts                  -- Structured file + stderr logger
+    project-name.ts            -- Derives project name from cwd
+  shared/
+    paths.ts                   -- DB_PATH, DATA_DIR, LOG_DIR constants
+    SettingsDefaultsManager.ts -- Default settings and env var overrides
+    hook-constants.ts          -- Exit codes, timeouts
 
 plugin/
   scripts/
-    hook-command.js        -- Built ESM bundle (hooks entry point)
-    mcp-server.cjs         -- Built CJS bundle (MCP server)
-    bun-runner.sh          -- Resolves bun binary path
-    worker-service.cjs     -- Legacy (not used)
-    context-generator.cjs  -- Legacy (not used)
+    hook-command.js            -- Built ESM bundle (hooks entry point)
+    mcp-server.cjs             -- Built CJS bundle (MCP server)
+    bun-runner.sh              -- Resolves bun binary path
   hooks/
-    hooks.json             -- Hook definitions (template with ${CLAUDE_PLUGIN_ROOT})
+    hooks.json                 -- Hook definitions (template)
 
 scripts/
-  build-hooks.js           -- esbuild script (builds all bundles)
+  build-hooks.js               -- esbuild script (builds all bundles)
 ```
 
-## Building from Source
+## Environment Variables
 
-```bash
-git clone https://github.com/askqai/claude-recall.git
-cd claude-recall
-npm install
-node scripts/build-hooks.js
-```
-
-The build produces:
-- `plugin/scripts/hook-command.js` — ESM format, ~65 KB
-- `plugin/scripts/mcp-server.cjs` — CJS format, ~760 KB
-- Type declaration errors during build are pre-existing and non-fatal
-
-After building, update the paths in `~/.claude/settings.json` and `~/.claude.json` to point to your clone location.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CLAUDE_RECALL_DATA_DIR` | `~/.claude-recall` | Data directory for DB and logs |
+| `CLAUDE_RECALL_LOG_LEVEL` | `INFO` | Log verbosity (DEBUG, INFO, WARN, ERROR, SILENT) |
+| `CLAUDE_RECALL_WORKER_PORT` | `37777` | Legacy — not used in direct SQLite mode |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code config directory |
 
 ## Troubleshooting
 
@@ -403,49 +645,48 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
   ~/.bun/bin/bun plugin/scripts/mcp-server.cjs
 ```
 
-Check the MCP config in `~/.claude.json`:
-```bash
-python3 -c "import json; c=json.load(open('$HOME/.claude.json')); print(json.dumps(c.get('mcpServers',{}), indent=2))"
-```
-
 ### Database locked errors
 
-Multiple concurrent writes can cause lock contention. The `busy_timeout=5000` pragma should handle most cases. If you see persistent lock errors:
+Multiple concurrent writes can cause lock contention. The `busy_timeout=5000` pragma handles most cases. If persistent:
 ```bash
-# Check for stuck processes
 lsof ~/.claude-recall/claude-recall.db
-```
-
-### Sessions stuck in "active"
-
-If Claude Code crashes, sessions remain active. This is harmless — the context handler queries by recency, not status. To clean up manually:
-```bash
-sqlite3 ~/.claude-recall/claude-recall.db "UPDATE sdk_sessions SET status='completed' WHERE status='active' AND started_at_epoch < strftime('%s','now') - 86400;"
 ```
 
 ### Checking database size
 
 ```bash
-sqlite3 ~/.claude-recall/claude-recall.db "SELECT (page_count * page_size / 1024 / 1024) || ' MB' as size FROM pragma_page_count(), pragma_page_size();"
+sqlite3 ~/.claude-recall/claude-recall.db \
+  "SELECT (page_count * page_size / 1024 / 1024) || ' MB' as size FROM pragma_page_count(), pragma_page_size();"
 ```
 
 ### Viewing recent activity
 
 ```bash
-# Recent observations
-sqlite3 ~/.claude-recall/claude-recall.db "SELECT id, project, tool_name, created_at FROM raw_observations ORDER BY id DESC LIMIT 10;"
+# Recent observations with relevance scores
+sqlite3 ~/.claude-recall/claude-recall.db \
+  "SELECT id, project, tool_name, relevance_score, created_at FROM raw_observations ORDER BY id DESC LIMIT 10;"
 
 # Recent sessions
-sqlite3 ~/.claude-recall/claude-recall.db "SELECT content_session_id, project, status, prompt_counter, started_at FROM sdk_sessions ORDER BY rowid DESC LIMIT 10;"
+sqlite3 ~/.claude-recall/claude-recall.db \
+  "SELECT content_session_id, project, status, prompt_counter, privacy_suppressed, started_at FROM sdk_sessions ORDER BY rowid DESC LIMIT 10;"
 
-# Recent prompts
-sqlite3 ~/.claude-recall/claude-recall.db "SELECT content_session_id, prompt_number, substr(prompt_text, 1, 80), created_at FROM user_prompts ORDER BY id DESC LIMIT 10;"
+# Consolidated sessions
+sqlite3 ~/.claude-recall/claude-recall.db \
+  "SELECT id, project, prompt_count, tool_use_count, original_started_at FROM consolidated_sessions ORDER BY id DESC LIMIT 10;"
+
+# Check for redacted observations
+sqlite3 ~/.claude-recall/claude-recall.db \
+  "SELECT COUNT(*) as redacted_count FROM raw_observations WHERE redacted = 1;"
 ```
 
 ## Privacy
 
 All data is stored locally on disk at `~/.claude-recall/`. Nothing is sent to external services. The MCP server communicates only via stdio (no network).
 
+Sensitive content (API keys, tokens, passwords) is automatically redacted before storage. Use `<private>` tags to suppress storage entirely for sensitive interactions.
+
 ## License
 
 [Apache-2.0](LICENSE)
+
+Copyright 2025 AskQ AI

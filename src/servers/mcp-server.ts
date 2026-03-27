@@ -105,7 +105,7 @@ interface LegacyObsRow {
 function handleSearch(args: Record<string, any>): { content: Array<{ type: 'text'; text: string }> } {
   const query = args.query as string || '';
   const limit = Math.min(Number(args.limit) || 20, 100);
-  const project = args.project as string | undefined;
+  const project = args.cross_project ? undefined : (args.project as string | undefined);
   const offset = Number(args.offset) || 0;
 
   const results: SearchRow[] = [];
@@ -225,12 +225,40 @@ function handleSearch(args: Record<string, any>): { content: Array<{ type: 'text
     // Legacy table may not exist or have different schema
   }
 
+  // Also search consolidated_sessions
+  try {
+    if (query.trim()) {
+      const likePattern = `%${query}%`;
+      if (project) {
+        const consolidatedResults = cachedPrepare(
+          `SELECT id, 'consolidated' as source, content_session_id, project, NULL as tool_name,
+                  NULL as title, NULL as type, original_started_at as created_at, original_started_at_epoch as created_at_epoch
+           FROM consolidated_sessions
+           WHERE summary LIKE ? AND project = ?
+           ORDER BY original_started_at_epoch DESC LIMIT ?`
+        ).all(likePattern, project, Math.floor(limit / 4)) as SearchRow[];
+        results.push(...consolidatedResults);
+      } else {
+        const consolidatedResults = cachedPrepare(
+          `SELECT id, 'consolidated' as source, content_session_id, project, NULL as tool_name,
+                  NULL as title, NULL as type, original_started_at as created_at, original_started_at_epoch as created_at_epoch
+           FROM consolidated_sessions
+           WHERE summary LIKE ?
+           ORDER BY original_started_at_epoch DESC LIMIT ?`
+        ).all(likePattern, Math.floor(limit / 4)) as SearchRow[];
+        results.push(...consolidatedResults);
+      }
+    }
+  } catch {
+    // consolidated_sessions table may not exist yet
+  }
+
   // Sort combined results by time
   results.sort((a, b) => b.created_at_epoch - a.created_at_epoch);
 
   // Format as compact index
   const lines = results.slice(0, limit).map(r => {
-    const source = r.source === 'raw' ? 'R' : 'L';
+    const source = r.source === 'raw' ? 'R' : r.source === 'consolidated' ? 'C' : 'L';
     const tool = r.tool_name || r.type || '';
     const title = r.title || '';
     return `[${source}:${r.id}] ${r.created_at} | ${r.project} | ${tool} ${title}`.trim();
@@ -240,7 +268,7 @@ function handleSearch(args: Record<string, any>): { content: Array<{ type: 'text
     content: [{
       type: 'text' as const,
       text: lines.length > 0
-        ? `Found ${results.length} results:\n\n${lines.join('\n')}\n\nUse get_observations(ids=[...]) for full details. R=raw, L=legacy.`
+        ? `Found ${results.length} results:\n\n${lines.join('\n')}\n\nUse get_observations(ids=[...]) for full details. R=raw, L=legacy, C=consolidated.`
         : 'No results found.'
     }]
   };
@@ -313,9 +341,10 @@ function handleTimeline(args: Record<string, any>): { content: Array<{ type: 'te
  * Parse prefixed IDs (e.g. "R:1", "L:5") into { source, id } pairs.
  * Accepts both prefixed strings and plain numbers.
  */
-function parseIds(ids: Array<string | number>): { rawIds: number[]; legacyIds: number[] } {
+function parseIds(ids: Array<string | number>): { rawIds: number[]; legacyIds: number[]; consolidatedIds: number[] } {
   const rawIds: number[] = [];
   const legacyIds: number[] = [];
+  const consolidatedIds: number[] = [];
   for (const id of ids) {
     const s = String(id).trim();
     if (s.startsWith('R:') || s.startsWith('r:')) {
@@ -324,16 +353,18 @@ function parseIds(ids: Array<string | number>): { rawIds: number[]; legacyIds: n
     } else if (s.startsWith('L:') || s.startsWith('l:')) {
       const num = Number(s.slice(2));
       if (!isNaN(num) && num > 0) legacyIds.push(num);
+    } else if (s.startsWith('C:') || s.startsWith('c:')) {
+      const num = Number(s.slice(2));
+      if (!isNaN(num) && num > 0) consolidatedIds.push(num);
     } else {
       const num = Number(s);
       if (!isNaN(num) && num > 0) {
-        // No prefix — search both tables
         rawIds.push(num);
         legacyIds.push(num);
       }
     }
   }
-  return { rawIds: rawIds.slice(0, 50), legacyIds: legacyIds.slice(0, 50) };
+  return { rawIds: rawIds.slice(0, 50), legacyIds: legacyIds.slice(0, 50), consolidatedIds: consolidatedIds.slice(0, 50) };
 }
 
 /**
@@ -346,7 +377,7 @@ function handleGetObservations(args: Record<string, any>): { content: Array<{ ty
     return { content: [{ type: 'text' as const, text: 'Error: ids array is required' }] };
   }
 
-  const { rawIds, legacyIds } = parseIds(ids);
+  const { rawIds, legacyIds, consolidatedIds } = parseIds(ids);
   const results: any[] = [];
 
   // Fetch from raw_observations
@@ -400,6 +431,34 @@ function handleGetObservations(args: Record<string, any>): { content: Array<{ ty
     }
   }
 
+  // Fetch from consolidated_sessions
+  if (consolidatedIds.length > 0) {
+    try {
+      const cPlaceholders = consolidatedIds.map(() => '?').join(',');
+      const cRows = db.prepare(
+        `SELECT * FROM consolidated_sessions WHERE id IN (${cPlaceholders}) ORDER BY original_started_at_epoch DESC`
+      ).all(...consolidatedIds) as any[];
+
+      for (const r of cRows) {
+        results.push({
+          source: 'consolidated',
+          id: r.id,
+          session: r.content_session_id,
+          project: r.project,
+          summary: r.summary,
+          prompt_count: r.prompt_count,
+          tool_use_count: r.tool_use_count,
+          files_touched: r.files_touched,
+          commands_run: r.commands_run,
+          original_started_at: r.original_started_at,
+          consolidated_at: r.consolidated_at
+        });
+      }
+    } catch {
+      // consolidated_sessions table may not exist yet
+    }
+  }
+
   return {
     content: [{
       type: 'text' as const,
@@ -412,6 +471,92 @@ function handleGetObservations(args: Record<string, any>): { content: Array<{ ty
 
 function truncate(s: string, maxLen: number): string {
   return s.length > maxLen ? s.slice(0, maxLen) + '...[truncated]' : s;
+}
+
+/**
+ * Forget: delete observations matching a query or specific IDs.
+ * Requires confirm=true to actually delete; otherwise does a dry run.
+ */
+function handleForget(args: Record<string, any>): { content: Array<{ type: 'text'; text: string }> } {
+  const query = args.query as string | undefined;
+  const ids = args.ids as Array<string | number> | undefined;
+  const confirm = args.confirm === true;
+
+  if (!query && (!ids || ids.length === 0)) {
+    return { content: [{ type: 'text' as const, text: 'Error: provide either query or ids to identify observations to forget.' }] };
+  }
+
+  let rawIdsToDelete: number[] = [];
+
+  if (ids && ids.length > 0) {
+    const parsed = parseIds(ids);
+    rawIdsToDelete = parsed.rawIds;
+    // Also delete legacy if specified
+    if (confirm && parsed.legacyIds.length > 0) {
+      const legacyPlaceholders = parsed.legacyIds.map(() => '?').join(',');
+      try { db.run(`DELETE FROM observations WHERE id IN (${legacyPlaceholders})`, ...parsed.legacyIds); } catch {}
+    }
+  } else if (query) {
+    // Find matching raw observation IDs via FTS
+    const ftsQuery = query.split(/\s+/).map(term => `"${term.replace(/"/g, '')}"`).join(' ');
+    try {
+      const rows = db.prepare(
+        `SELECT r.id FROM raw_observations r
+         JOIN raw_observations_fts f ON r.id = f.rowid
+         WHERE raw_observations_fts MATCH ?
+         ORDER BY r.created_at_epoch DESC LIMIT 100`
+      ).all(ftsQuery) as Array<{ id: number }>;
+      rawIdsToDelete = rows.map(r => r.id);
+    } catch {
+      // FTS syntax error — fallback to LIKE
+      const likePattern = `%${query}%`;
+      const rows = db.prepare(
+        `SELECT id FROM raw_observations
+         WHERE tool_name LIKE ? OR tool_input LIKE ?
+         ORDER BY created_at_epoch DESC LIMIT 100`
+      ).all(likePattern, likePattern) as Array<{ id: number }>;
+      rawIdsToDelete = rows.map(r => r.id);
+    }
+  }
+
+  if (rawIdsToDelete.length === 0) {
+    return { content: [{ type: 'text' as const, text: 'No matching observations found.' }] };
+  }
+
+  if (!confirm) {
+    // Dry run — show what would be deleted
+    const sample = rawIdsToDelete.slice(0, 5);
+    const sampleRows = sample.map(id => {
+      const row = db.prepare('SELECT id, tool_name, created_at FROM raw_observations WHERE id = ?').get(id) as any;
+      return row ? `[R:${row.id}] ${row.created_at} | ${row.tool_name}` : `[R:${id}] (not found)`;
+    });
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Would delete ${rawIdsToDelete.length} observations. Sample:\n${sampleRows.join('\n')}\n\nCall forget() again with confirm=true to delete.`
+      }]
+    };
+  }
+
+  // Actually delete
+  const placeholders = rawIdsToDelete.map(() => '?').join(',');
+  const result = db.run(`DELETE FROM raw_observations WHERE id IN (${placeholders})`, ...rawIdsToDelete);
+
+  // Also check consolidated_sessions if query provided
+  let consolidatedDeleted = 0;
+  if (query) {
+    try {
+      const cResult = db.run(`DELETE FROM consolidated_sessions WHERE summary LIKE ?`, `%${query}%`);
+      consolidatedDeleted = cResult.changes;
+    } catch { /* table may not exist yet */ }
+  }
+
+  return {
+    content: [{
+      type: 'text' as const,
+      text: `Deleted ${result.changes} raw observations${consolidatedDeleted > 0 ? ` and ${consolidatedDeleted} consolidated sessions` : ''}. These memories have been permanently removed.`
+    }]
+  };
 }
 
 /**
@@ -449,20 +594,21 @@ NEVER fetch full details without filtering first. 10x token savings.`,
    Returns: Complete details (~500-1000 tokens/result)
 
 **Why:** 10x token savings. Never fetch full details without filtering first.
-Prefix R: = raw observations, L: = legacy observations.`
+Prefix R: = raw observations, L: = legacy observations, C: = consolidated sessions.`
       }]
     })
   },
   {
     name: 'search',
-    description: 'Step 1: Search memory. Returns index with IDs. Params: query, limit, project, offset',
+    description: 'Step 1: Search memory. Returns index with IDs. Params: query, limit, project, offset, cross_project',
     inputSchema: {
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Search query (FTS5 for raw observations, LIKE for legacy)' },
         limit: { type: 'number', description: 'Max results (default 20, max 100)' },
         project: { type: 'string', description: 'Filter by project name' },
-        offset: { type: 'number', description: 'Pagination offset' }
+        offset: { type: 'number', description: 'Pagination offset' },
+        cross_project: { type: 'boolean', description: 'Search across all projects (ignores project filter)' }
       },
       additionalProperties: true
     },
@@ -501,6 +647,24 @@ Prefix R: = raw observations, L: = legacy observations.`
       additionalProperties: true
     },
     handler: async (args: any) => handleGetObservations(args)
+  },
+  {
+    name: 'forget',
+    description: 'Delete observations matching a query or specific IDs. Use to remove sensitive or unwanted memories. Requires confirm=true to actually delete.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query to find observations to delete' },
+        ids: {
+          type: 'array',
+          items: { oneOf: [{ type: 'number' }, { type: 'string' }] },
+          description: 'Specific IDs to delete (R:1, L:5)'
+        },
+        confirm: { type: 'boolean', description: 'Must be true to actually delete. Without it, shows what would be deleted.' }
+      },
+      additionalProperties: true
+    },
+    handler: async (args: any) => handleForget(args)
   }
 ];
 

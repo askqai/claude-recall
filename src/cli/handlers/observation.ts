@@ -12,6 +12,9 @@ import { openDatabase } from '../../services/sqlite/DirectDB.js';
 import { getProjectName } from '../../utils/project-name.js';
 import { logger } from '../../utils/logger.js';
 import { readFileSync } from 'fs';
+import { computeRelevanceScore } from './relevance.js';
+import { redactSensitiveContent, containsSensitivePatterns } from '../../utils/privacy.js';
+import { consolidateOldSessions, applyTimeDecay, smartCleanup } from '../../services/consolidation.js';
 
 /** Max size for tool_response storage (10KB). Larger responses are truncated. */
 const MAX_RESPONSE_BYTES = 10_000;
@@ -135,20 +138,56 @@ export const observationHandler: EventHandler = {
         [sessionId, project, now.toISOString(), nowEpoch]
       );
 
-      // Get current prompt number for this session
+      // Get current prompt number and privacy state for this session
       const session = db.prepare(
-        'SELECT prompt_counter FROM sdk_sessions WHERE content_session_id = ?'
-      ).get(sessionId) as { prompt_counter: number } | undefined;
+        'SELECT prompt_counter, privacy_suppressed FROM sdk_sessions WHERE content_session_id = ?'
+      ).get(sessionId) as { prompt_counter: number; privacy_suppressed: number } | undefined;
       const promptNumber = session?.prompt_counter ?? 0;
 
+      // Skip storage entirely if privacy suppression is active
+      if (session?.privacy_suppressed) {
+        logger.debug('HOOK', 'Observation skipped — privacy suppression active', { toolName });
+        return { continue: true, suppressOutput: true };
+      }
+
       // Truncate large payloads to prevent DB bloat
-      const inputStr = truncateStr(stringify(toolInput), MAX_INPUT_BYTES);
-      const responseStr = truncateStr(stringify(toolResponse), MAX_RESPONSE_BYTES);
+      let inputStr = truncateStr(stringify(toolInput), MAX_INPUT_BYTES);
+      let responseStr = truncateStr(stringify(toolResponse), MAX_RESPONSE_BYTES);
+
+      // Auto-redact sensitive content (API keys, tokens, passwords)
+      let redacted = 0;
+      if (inputStr && containsSensitivePatterns(inputStr)) {
+        inputStr = redactSensitiveContent(inputStr);
+        redacted = 1;
+      }
+      if (responseStr && containsSensitivePatterns(responseStr)) {
+        responseStr = redactSensitiveContent(responseStr);
+        redacted = 1;
+      }
+
+      // Compute relevance score for smart prioritization
+      const recentTools = db.prepare(
+        `SELECT tool_name, tool_input FROM raw_observations
+         WHERE content_session_id = ? ORDER BY id DESC LIMIT 5`
+      ).all(sessionId) as Array<{ tool_name: string; tool_input: string | null }>;
+
+      const lastPrompt = db.prepare(
+        `SELECT prompt_text FROM user_prompts
+         WHERE content_session_id = ? ORDER BY prompt_number DESC LIMIT 1`
+      ).get(sessionId) as { prompt_text: string } | undefined;
+
+      const relevanceScore = computeRelevanceScore({
+        toolName,
+        toolInput,
+        toolResponse,
+        recentTools,
+        lastPromptText: lastPrompt?.prompt_text,
+      });
 
       db.run(
-        `INSERT INTO raw_observations (content_session_id, project, tool_name, tool_input, tool_response, cwd, prompt_number, created_at, created_at_epoch)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [sessionId, project, toolName, inputStr, responseStr, cwd, promptNumber, now.toISOString(), nowEpoch]
+        `INSERT INTO raw_observations (content_session_id, project, tool_name, tool_input, tool_response, cwd, prompt_number, created_at, created_at_epoch, relevance_score, redacted)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [sessionId, project, toolName, inputStr, responseStr, cwd, promptNumber, now.toISOString(), nowEpoch, relevanceScore, redacted]
       );
 
       // Periodic transcript capture: every ~10 minutes, snapshot assistant responses
@@ -169,21 +208,21 @@ export const observationHandler: EventHandler = {
         }
       }
 
-      // Periodic size-based cleanup: delete oldest observations when DB exceeds 10GB
+      // Periodic maintenance: consolidation, time decay, and size-based cleanup
       if (Math.random() < CLEANUP_PROBABILITY) {
+        // Consolidate old sessions (>7 days) into compressed summaries
+        consolidateOldSessions(db);
+
+        // Decay relevance scores for observations older than 30 days
+        applyTimeDecay(db);
+
+        // Size-based cleanup: delete low-relevance observations when DB exceeds 10GB
         const pageCount = (db.prepare('PRAGMA page_count').get() as { page_count: number })?.page_count ?? 0;
         if (pageCount > MAX_DB_PAGES) {
           const totalRows = (db.prepare('SELECT COUNT(*) as cnt FROM raw_observations').get() as { cnt: number })?.cnt ?? 0;
           const deleteCount = Math.max(100, Math.floor(totalRows * CLEANUP_BATCH_PERCENT));
-          const deleted = db.run(
-            `DELETE FROM raw_observations WHERE id IN (
-              SELECT id FROM raw_observations ORDER BY created_at_epoch ASC LIMIT ?
-            )`,
-            [deleteCount]
-          );
-          if (deleted.changes > 0) {
-            logger.info('HOOK', `Size cleanup: deleted ${deleted.changes} oldest observations (DB was ${Math.round(pageCount * 4096 / 1024 / 1024)}MB, limit 10GB)`);
-          }
+          smartCleanup(db, deleteCount);
+          logger.info('HOOK', `Size cleanup triggered (DB was ${Math.round(pageCount * 4096 / 1024 / 1024)}MB, limit 10GB)`);
         }
       }
 

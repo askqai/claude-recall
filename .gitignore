@@ -26,10 +26,18 @@ logs/
 # Bun
 .bun-path
 
+# SQLite databases
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
 # Temporary files
 *.tmp
 *.temp
 .cache/
 
 # Claude Code local settings
-.claude/settings.local.json
+.claude/

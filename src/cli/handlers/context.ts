@@ -152,6 +152,94 @@ function buildCompactSummary(db: any, session: SessionRow): string {
   return lines.join('\n').trim();
 }
 
+/**
+ * Get brief summaries of recent activity in OTHER projects.
+ * Helps surface cross-project patterns and recent work context.
+ */
+function buildCrossProjectSummary(db: any, currentProjects: string[]): string {
+  const placeholders = currentProjects.map(() => '?').join(',');
+  const sevenDaysAgo = Math.floor(Date.now() / 1000) - 7 * 24 * 3600;
+
+  let rows: Array<{ project: string; last_active: number; session_count: number }>;
+  try {
+    rows = db.prepare(
+      `SELECT project, MAX(started_at_epoch) as last_active, COUNT(*) as session_count
+       FROM sdk_sessions
+       WHERE project NOT IN (${placeholders}) AND started_at_epoch > ?
+       GROUP BY project
+       ORDER BY last_active DESC
+       LIMIT 5`
+    ).all(...currentProjects, sevenDaysAgo);
+  } catch {
+    return '';
+  }
+
+  if (!rows || rows.length === 0) return '';
+
+  const lines = ['## Recent Activity in Other Projects'];
+  let used = lines[0].length;
+
+  for (const r of rows) {
+    if (used > MAX_CROSS_PROJECT_CHARS - 100) break;
+
+    // Get most recent prompt from that project
+    let snippet = '';
+    try {
+      const recentPrompt = db.prepare(
+        `SELECT up.prompt_text FROM user_prompts up
+         JOIN sdk_sessions s ON s.content_session_id = up.content_session_id
+         WHERE s.project = ?
+         ORDER BY up.created_at_epoch DESC LIMIT 1`
+      ).get(r.project) as { prompt_text: string } | undefined;
+      snippet = recentPrompt?.prompt_text?.slice(0, 80)?.replace(/\n/g, ' ') || '';
+    } catch {}
+
+    const line = `- **${r.project}** (${r.session_count} sessions): ${snippet}`;
+    lines.push(line);
+    used += line.length;
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Get brief context from consolidated (older) sessions for this project.
+ * Returns a short section showing what was worked on historically.
+ */
+function getConsolidatedContext(db: any, projects: string[], currentLength: number): string {
+  const budget = MAX_SUMMARY_CHARS - currentLength - 200;
+  if (budget < 200) return '';
+
+  const placeholders = projects.map(() => '?').join(',');
+  let rows: Array<{ project: string; summary: string; prompt_count: number; tool_use_count: number; original_started_at: string }>;
+  try {
+    rows = db.prepare(
+      `SELECT project, summary, prompt_count, tool_use_count, original_started_at
+       FROM consolidated_sessions
+       WHERE project IN (${placeholders})
+       ORDER BY original_started_at_epoch DESC
+       LIMIT 5`
+    ).all(...projects);
+  } catch {
+    return ''; // table may not exist yet
+  }
+
+  if (!rows || rows.length === 0) return '';
+
+  const lines = ['## Older Sessions (consolidated)'];
+  let used = lines[0].length;
+
+  for (const r of rows) {
+    if (used > budget) break;
+    const snippet = r.summary.length > 150 ? r.summary.slice(0, 150) + '...' : r.summary;
+    const line = `- **${r.original_started_at.split('T')[0]}** (${r.prompt_count}p/${r.tool_use_count}t): ${snippet.replace(/\n/g, ' ')}`;
+    lines.push(line);
+    used += line.length;
+  }
+
+  return lines.join('\n');
+}
+
 // ─── Main handler ───────────────────────────────────────────────────────
 
 export const contextHandler: EventHandler = {
@@ -187,9 +275,20 @@ export const contextHandler: EventHandler = {
       const bestSession = withPrompts.length > 0
         ? withPrompts.reduce((a, b) => a.prompt_counter >= b.prompt_counter ? a : b)
         : sessions[0];
-      const additionalContext = bestSession.prompt_counter > 0
+      let additionalContext = bestSession.prompt_counter > 0
         ? buildCompactSummary(db, bestSession)
         : '';
+
+      // Append consolidated session summaries if budget allows
+      if (additionalContext.length < MAX_SUMMARY_CHARS - 500) {
+        const consolidated = getConsolidatedContext(db, projects, additionalContext.length);
+        if (consolidated) {
+          additionalContext += '\n\n' + consolidated;
+        }
+      }
+
+      // Cross-project recall is available on-demand via MCP search(cross_project=true)
+      // Not injected automatically to keep context focused on the current project.
 
       logger.debug('HOOK', 'Context generated', {
         sessions: sessions.length,
