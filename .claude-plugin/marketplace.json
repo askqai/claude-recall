@@ -1,0 +1,15 @@
+{
+  "name": "claude-recall",
+  "owner": {
+    "name": "Richard Chow",
+    "email": "askqai@mitns.com"
+  },
+  "plugins": [
+    {
+      "name": "claude-recall",
+      "source": ".",
+      "description": "Lightweight persistent memory for Claude Code with full-fidelity Recovery Mode",
+      "version": "11.2.0"
+    }
+  ]
+}

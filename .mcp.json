@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "claude-recall": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/plugin/scripts/bun-runner.sh",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/plugin/scripts/mcp-server.cjs"
+      ]
+    }
+  }
+}

@@ -10,6 +10,7 @@ All data stays local in a single SQLite database. No background daemons, no netw
 
 | Feature | claude-recall | claude-mem | Others |
 |---------|:---:|:---:|:---:|
+| **One-command install** (`/plugin install claude-recall`) | **Yes** | Yes | Varies |
 | **Full-fidelity session recovery** (24h window, up to 1M tokens) | **Yes** | No (lossy AI summary only) | No |
 | **Zero API token cost** (no AI compression calls) | **Yes** | No (uses Claude Agent SDK) | Varies |
 | Zero background daemons | Yes | No (Express server) | Varies |
@@ -232,21 +233,55 @@ For multi-session features (which is most real work), Recovery Mode aggregates 3
 
 ## Installation
 
-### What You're Installing (read this first)
+### Quickstart (Plugin Marketplace)
 
-claude-recall has two parts that work together — you configure both:
+```text
+/plugin marketplace add askqai/claude-recall
+/plugin install claude-recall
+```
 
-| Part | What it does | Configured in |
-|------|-------------|---------------|
-| **Hooks** | Capture every tool use, prompt, and response automatically | `~/.claude/settings.json` |
-| **MCP Server** | Lets Claude search and recover the captured memory | `~/.claude.json` |
+That's it. Restart Claude Code and Recovery Mode will start working automatically. The plugin includes hooks (data capture) and the MCP server (search/forget tools) — both registered in one step.
 
-Both are required:
-- **Hooks alone** = data is captured but Claude can't query it
-- **MCP alone** = nothing to query (no data captured)
-- **Both** = full functionality (Recovery Mode, search, timeline, forget)
+**Prerequisite:** [Bun](https://bun.sh) must be installed (`curl -fsSL https://bun.sh/install | bash`). Everything else is bundled.
 
-This isn't a one-click plugin install — there's no `claude-recall install` command (yet). You build locally and configure both pieces by editing two JSON files. ~5 minutes total.
+### What's Installed
+
+claude-recall has two parts that work together:
+
+| Part | What it does |
+|------|-------------|
+| **Hooks** | Capture every tool use, prompt, and response automatically (5 lifecycle hooks) |
+| **MCP Server** | Lets Claude search, recover, and forget memory (`search`, `timeline`, `get_observations`, `forget`) |
+
+The plugin marketplace install registers both automatically.
+
+### Verify
+
+```bash
+# Check the database was created after your first session
+ls -la ~/.claude-recall/claude-recall.db
+
+# Confirm observations are landing
+sqlite3 ~/.claude-recall/claude-recall.db "SELECT COUNT(*) FROM raw_observations;"
+```
+
+### Inside a Claude Code Session
+
+Once installed, you can ask Claude things like:
+
+- *"Search my memory for the auth bug fix"* — Claude calls `mcp__claude-recall__search`
+- *"What did I work on yesterday in the workweek repo?"* — `search` with project filter
+- *"Search across all repos for stripe webhook"* — `search` with `cross_project=true`
+- *"Forget any observations mentioning my-old-api-key"* — `forget` tool
+- *"Show me the timeline around when I last touched login.ts"* — `timeline` tool
+
+The MCP tools are visible to Claude as `mcp__claude-recall__*`.
+
+---
+
+## Manual Installation (Advanced / Development)
+
+For local development or if you prefer to manage the install yourself.
 
 ### Prerequisites
 
@@ -434,17 +469,6 @@ else:
 ```
 
 If everything is configured correctly, all 5 hooks should show ✓ and `claude-recall` should be registered.
-
-### Inside a Claude Code Session
-
-Once installed and Claude Code is restarted, you should see Recovery Mode automatically inject context at session start. Within a session you can also ask Claude things like:
-
-- *"Search my memory for the auth bug fix"* — Claude calls `mcp__claude-recall__search`
-- *"What did I work on yesterday in the workweek repo?"* — `search` with `cross_project=true` and project filter
-- *"Forget any observations mentioning my-old-api-key"* — `forget` tool
-- *"Show me the timeline around when I last touched login.ts"* — `timeline` tool
-
-The MCP tools are visible to Claude as `mcp__claude-recall__*`.
 
 ## How It Works
 
