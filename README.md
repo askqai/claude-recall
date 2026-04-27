@@ -232,6 +232,22 @@ For multi-session features (which is most real work), Recovery Mode aggregates 3
 
 ## Installation
 
+### What You're Installing (read this first)
+
+claude-recall has two parts that work together — you configure both:
+
+| Part | What it does | Configured in |
+|------|-------------|---------------|
+| **Hooks** | Capture every tool use, prompt, and response automatically | `~/.claude/settings.json` |
+| **MCP Server** | Lets Claude search and recover the captured memory | `~/.claude.json` |
+
+Both are required:
+- **Hooks alone** = data is captured but Claude can't query it
+- **MCP alone** = nothing to query (no data captured)
+- **Both** = full functionality (Recovery Mode, search, timeline, forget)
+
+This isn't a one-click plugin install — there's no `claude-recall install` command (yet). You build locally and configure both pieces by editing two JSON files. ~5 minutes total.
+
 ### Prerequisites
 
 | Dependency | Version | Why |
@@ -392,6 +408,43 @@ Expected output:
 ```json
 {"continue":true,"suppressOutput":true}
 ```
+
+### One-Shot Validation
+
+Confirm both hooks AND the MCP server are correctly registered:
+
+```bash
+python3 -c "
+import json
+print('=== Hooks ===')
+with open('$HOME/.claude/settings.json') as f:
+    hooks = json.load(f).get('hooks', {})
+for event in ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop', 'SessionEnd']:
+    print(f'  {\"✓\" if event in hooks else \"✗\"} {event}')
+
+print()
+print('=== MCP Server ===')
+with open('$HOME/.claude.json') as f:
+    servers = json.load(f).get('mcpServers', {})
+if 'claude-recall' in servers:
+    print('  ✓ claude-recall registered')
+else:
+    print('  ✗ claude-recall not found')
+"
+```
+
+If everything is configured correctly, all 5 hooks should show ✓ and `claude-recall` should be registered.
+
+### Inside a Claude Code Session
+
+Once installed and Claude Code is restarted, you should see Recovery Mode automatically inject context at session start. Within a session you can also ask Claude things like:
+
+- *"Search my memory for the auth bug fix"* — Claude calls `mcp__claude-recall__search`
+- *"What did I work on yesterday in the workweek repo?"* — `search` with `cross_project=true` and project filter
+- *"Forget any observations mentioning my-old-api-key"* — `forget` tool
+- *"Show me the timeline around when I last touched login.ts"* — `timeline` tool
+
+The MCP tools are visible to Claude as `mcp__claude-recall__*`.
 
 ## How It Works
 
