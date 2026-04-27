@@ -10,6 +10,8 @@ All data stays local in a single SQLite database. No background daemons, no netw
 
 | Feature | claude-recall | claude-mem | Others |
 |---------|:---:|:---:|:---:|
+| **Full-fidelity session recovery** (24h window, up to 1M tokens) | **Yes** | No (lossy AI summary only) | No |
+| **Zero API token cost** (no AI compression calls) | **Yes** | No (uses Claude Agent SDK) | Varies |
 | Zero background daemons | Yes | No (Express server) | Varies |
 | No Python/Chroma required | Yes | No | Varies |
 | Direct SQLite (WAL mode) | Yes | HTTP proxy | Varies |
@@ -20,6 +22,7 @@ All data stays local in a single SQLite database. No background daemons, no netw
 | Cross-project search | Yes | No | No |
 | Token-efficient 3-layer search | Yes | Yes | No |
 | Single dependency (MCP SDK) | Yes | No (15+ deps) | Varies |
+| **License** | **Apache 2.0** | AGPL-3.0 | Varies |
 
 ## Architecture
 
@@ -126,35 +129,71 @@ search(query="auth middleware", cross_project=true)
 
 By default, context injection and search are scoped to the current project (derived from the working directory). Cross-project is opt-in only.
 
-### 5. Context Injection
+### 5. Session Recovery & Context Injection
 
-When a new session starts, a compact summary (~2K tokens) is injected:
+When a new session starts, claude-recall picks one of two modes automatically based on how recent your last activity was:
+
+#### Recovery Mode (recent activity within 24 hours)
+
+If you crashed, lost power, hit auto-update, or just closed Claude Code and came back — the next session **dumps your last 24 hours of activity in full fidelity**. No searching, no AI summarization, no lossy compression. You're back exactly where you left off.
+
+```markdown
+# Session Recovery — my-app
+Last activity: 23 minutes ago. Recovered 1 session(s) from the last 24 hours.
+This is a full-fidelity dump of recent work — pick up where you left off.
+
+---
+## Session 2026-04-26 14:30:00 UTC (interrupted) — 12 prompt(s), 87 tool use(s)
+
+### Prompt 1
+> Fix the authentication timeout bug in the login flow
+
+**Claude:** Looking at src/auth/middleware.ts, I found the JWT expiry logic
+expects seconds but the env var is in milliseconds. Let me trace through...
+[FULL response, not truncated]
+
+#### Tool uses
+- **Read** src/auth/middleware.ts
+- **Edit** src/auth/jwt.ts
+- **Bash**: `npm test`
+
+### Prompt 2
+> Now make sure the refresh handles edge cases
+[continues...]
+```
+
+**Configurable via env vars:**
+```bash
+CLAUDE_RECALL_RECOVERY_WINDOW_HOURS=24      # how recent counts as "recovery"
+CLAUDE_RECALL_RECOVERY_BUDGET_TOKENS=200000 # max tokens to inject (default 200K)
+                                             # set to 1000000 if on extended (1M) context
+```
+
+The system dumps everything within the window **up to** the budget — it doesn't pad to fill it. A 40K-token session injects 40K, not 200K.
+
+#### Summary Mode (no recent activity)
+
+When you're returning to a project after days or weeks, you don't need the full transcript — you need orientation. claude-recall falls back to a compact ~2K token summary:
 
 ```markdown
 # Previous Session — my-app
-Status: completed | Started: 2026-03-27T14:30:00Z | 5 prompts, 23 tool uses
+Status: completed | Started: 2026-03-15T14:30:00Z | 5 prompts, 23 tool uses
 Use MCP tools (search, timeline, get_observations) for full details.
 
 ## Prompt 1
 > Fix the authentication timeout bug in the login flow
-
 **Claude:** The issue was in src/auth/middleware.ts where the JWT expiry...
 
-### Files touched (8):
-- src/auth/middleware.ts
-- src/auth/jwt.ts
-...
-
-### Commands run (3):
-- `npm test`
-- `git diff`
-...
+### Files touched (8): src/auth/middleware.ts, src/auth/jwt.ts...
+### Commands run (3): npm test, git diff...
 
 ## Older Sessions (consolidated)
-- **2026-03-20** (12p/45t): P1: Refactor database connection pooling...
+- **2026-02-20** (12p/45t): Refactor database connection pooling...
 ```
 
-Full detail is always available on-demand via MCP tools — the injection is intentionally compact.
+Full detail is always available on-demand via MCP tools.
+
+**Why two modes?** Human memory works the same way: "what was I just doing?" needs total recall; "what did I work on last month?" only needs the gist. claude-recall mirrors that distinction automatically.
 
 ## Installation
 
@@ -606,6 +645,8 @@ scripts/
 |----------|---------|-------------|
 | `CLAUDE_RECALL_DATA_DIR` | `~/.claude-recall` | Data directory for DB and logs |
 | `CLAUDE_RECALL_LOG_LEVEL` | `INFO` | Log verbosity (DEBUG, INFO, WARN, ERROR, SILENT) |
+| `CLAUDE_RECALL_RECOVERY_WINDOW_HOURS` | `24` | How recent activity must be to trigger Recovery Mode |
+| `CLAUDE_RECALL_RECOVERY_BUDGET_TOKENS` | `200000` | Max tokens injected in Recovery Mode (set `1000000` for extended context) |
 | `CLAUDE_RECALL_WORKER_PORT` | `37777` | Legacy — not used in direct SQLite mode |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code config directory |
 

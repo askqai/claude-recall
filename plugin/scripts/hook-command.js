@@ -1185,6 +1185,175 @@ function getProjectContext(cwd) {
 
 // src/cli/handlers/context.ts
 var MAX_SUMMARY_CHARS = 8e3;
+var RECOVERY_WINDOW_HOURS = Number(process.env.CLAUDE_RECALL_RECOVERY_WINDOW_HOURS) || 24;
+var RECOVERY_BUDGET_TOKENS = Number(process.env.CLAUDE_RECALL_RECOVERY_BUDGET_TOKENS) || 2e5;
+var CHARS_PER_TOKEN = 4;
+var RECOVERY_BUDGET_CHARS = RECOVERY_BUDGET_TOKENS * CHARS_PER_TOKEN;
+function formatTimeAgo(epoch, now) {
+  const seconds = now - epoch;
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) {
+    const m = Math.floor(seconds / 60);
+    return `${m} minute${m === 1 ? "" : "s"} ago`;
+  }
+  if (seconds < 86400) {
+    const h = Math.floor(seconds / 3600);
+    return `${h} hour${h === 1 ? "" : "s"} ago`;
+  }
+  const d = Math.floor(seconds / 86400);
+  return `${d} day${d === 1 ? "" : "s"} ago`;
+}
+function formatToolUse(o) {
+  let input = o.tool_input;
+  try {
+    input = JSON.parse(input ?? "");
+  } catch {
+  }
+  if (["Read", "Write", "Edit"].includes(o.tool_name) && input?.file_path) {
+    return `- **${o.tool_name}** ${input.file_path}`;
+  }
+  if (o.tool_name === "Bash" && input?.command) {
+    const cmd = typeof input.command === "string" ? input.command : JSON.stringify(input.command);
+    return `- **Bash**: \`${cmd.slice(0, 200)}${cmd.length > 200 ? "..." : ""}\``;
+  }
+  if ((o.tool_name === "Grep" || o.tool_name === "Glob") && input?.pattern) {
+    return `- **${o.tool_name}** "${input.pattern}"${input.path ? ` in ${input.path}` : ""}`;
+  }
+  if (o.tool_name === "WebFetch" && input?.url) {
+    return `- **WebFetch** ${input.url}`;
+  }
+  if (o.tool_name === "WebSearch" && input?.query) {
+    return `- **WebSearch** "${input.query}"`;
+  }
+  return `- **${o.tool_name}**`;
+}
+function buildRecoveryContext(db, projects) {
+  const placeholders = projects.map(() => "?").join(",");
+  const cutoffEpoch = Math.floor(Date.now() / 1e3) - RECOVERY_WINDOW_HOURS * 3600;
+  const sessions = db.prepare(
+    `SELECT s.content_session_id, s.project, s.status, s.prompt_counter,
+            s.started_at, s.started_at_epoch,
+            (SELECT MAX(created_at_epoch) FROM raw_observations
+             WHERE content_session_id = s.content_session_id) as last_activity_epoch
+     FROM sdk_sessions s
+     WHERE s.project IN (${placeholders})
+       AND s.prompt_counter > 0
+       AND COALESCE(
+         (SELECT MAX(created_at_epoch) FROM raw_observations
+          WHERE content_session_id = s.content_session_id),
+         s.started_at_epoch
+       ) > ?
+     ORDER BY COALESCE(
+       (SELECT MAX(created_at_epoch) FROM raw_observations
+        WHERE content_session_id = s.content_session_id),
+       s.started_at_epoch
+     ) DESC`
+  ).all(...projects, cutoffEpoch);
+  if (sessions.length === 0) return null;
+  const now = Math.floor(Date.now() / 1e3);
+  const lines = [];
+  const mostRecent = sessions[0];
+  const lastEpoch = mostRecent.last_activity_epoch ?? mostRecent.started_at_epoch;
+  const timeAgo = formatTimeAgo(lastEpoch, now);
+  lines.push(`# Session Recovery \u2014 ${mostRecent.project}`);
+  lines.push(`Last activity: ${timeAgo}. Recovered ${sessions.length} session(s) from the last ${RECOVERY_WINDOW_HOURS} hours.`);
+  lines.push(`This is a full-fidelity dump of recent work \u2014 pick up where you left off.`);
+  lines.push(`For older history, use MCP tools (search, timeline, get_observations).
+`);
+  let used = lines.join("\n").length;
+  for (const session of sessions) {
+    if (used > RECOVERY_BUDGET_CHARS - 1e3) {
+      lines.push(`
+---
+*${sessions.length - sessions.indexOf(session)} more session(s) within window \u2014 budget exhausted. Use MCP search for older detail.*`);
+      break;
+    }
+    const dump = buildSessionDump(db, session, RECOVERY_BUDGET_CHARS - used);
+    if (dump) {
+      lines.push(dump);
+      used += dump.length;
+    }
+  }
+  return lines.join("\n").trim();
+}
+function buildSessionDump(db, session, budget) {
+  const sid = session.content_session_id;
+  const prompts = db.prepare(
+    `SELECT prompt_number, prompt_text FROM user_prompts
+     WHERE content_session_id = ? ORDER BY prompt_number ASC`
+  ).all(sid);
+  const observations = db.prepare(
+    `SELECT id, content_session_id, tool_name, tool_input, tool_response, prompt_number
+     FROM raw_observations
+     WHERE content_session_id = ? AND tool_name != '_assistant_responses'
+     ORDER BY id ASC`
+  ).all(sid);
+  const assistantRow = db.prepare(
+    `SELECT tool_response FROM raw_observations
+     WHERE content_session_id = ? AND tool_name = '_assistant_responses'
+     ORDER BY id DESC LIMIT 1`
+  ).get(sid);
+  let assistantResponses = [];
+  if (assistantRow?.tool_response) {
+    try {
+      assistantResponses = JSON.parse(assistantRow.tool_response);
+    } catch {
+    }
+  }
+  const assistantByPrompt = /* @__PURE__ */ new Map();
+  for (const r of assistantResponses) {
+    assistantByPrompt.set(r.prompt_number, r.text);
+  }
+  const observationsByPrompt = /* @__PURE__ */ new Map();
+  for (const obs of observations) {
+    const p = obs.prompt_number ?? 0;
+    if (!observationsByPrompt.has(p)) observationsByPrompt.set(p, []);
+    observationsByPrompt.get(p).push(obs);
+  }
+  const lines = [];
+  const statusLabel = session.status === "active" ? "interrupted" : session.status;
+  const sessionDate = new Date(session.started_at_epoch * 1e3).toISOString().replace("T", " ").slice(0, 19);
+  lines.push(`
+---
+## Session ${sessionDate} UTC (${statusLabel}) \u2014 ${session.prompt_counter} prompt(s), ${observations.length} tool use(s)
+`);
+  let used = lines.join("\n").length;
+  for (const p of prompts) {
+    if (used > budget - 500) break;
+    const promptBlock = `### Prompt ${p.prompt_number}
+> ${p.prompt_text.replace(/\n/g, "\n> ")}
+`;
+    if (used + promptBlock.length > budget - 200) break;
+    lines.push(promptBlock);
+    used += promptBlock.length;
+    const resp = assistantByPrompt.get(p.prompt_number);
+    if (resp) {
+      const respBlock = `
+**Claude:** ${resp}
+`;
+      if (used + respBlock.length > budget - 200) {
+        const remaining = budget - used - 300;
+        if (remaining > 200) {
+          lines.push(respBlock.slice(0, remaining) + "\n...[truncated for budget]\n");
+          used += remaining + 30;
+        }
+        break;
+      }
+      lines.push(respBlock);
+      used += respBlock.length;
+    }
+    const obs = observationsByPrompt.get(p.prompt_number) ?? [];
+    if (obs.length > 0) {
+      const toolLines = ["\n#### Tool uses", ...obs.map(formatToolUse)];
+      const toolBlock = toolLines.join("\n") + "\n";
+      if (used + toolBlock.length < budget - 100) {
+        lines.push(toolBlock);
+        used += toolBlock.length;
+      }
+    }
+  }
+  return lines.join("\n");
+}
 function buildCompactSummary(db, session) {
   const sid = session.content_session_id;
   const prompts = db.prepare(
@@ -1316,6 +1485,20 @@ var contextHandler = {
     const db = openDatabase();
     try {
       const projects = context.allProjects;
+      const recoveryContext = buildRecoveryContext(db, projects);
+      if (recoveryContext) {
+        logger.debug("HOOK", "Recovery mode active", {
+          contextLength: recoveryContext.length,
+          windowHours: RECOVERY_WINDOW_HOURS,
+          budgetTokens: RECOVERY_BUDGET_TOKENS
+        });
+        return {
+          hookSpecificOutput: {
+            hookEventName: "SessionStart",
+            additionalContext: recoveryContext
+          }
+        };
+      }
       const placeholders = projects.map(() => "?").join(",");
       const sessions = db.prepare(
         `SELECT content_session_id, project, status, prompt_counter, started_at, started_at_epoch
@@ -1341,7 +1524,7 @@ var contextHandler = {
           additionalContext += "\n\n" + consolidated;
         }
       }
-      logger.debug("HOOK", "Context generated", {
+      logger.debug("HOOK", "Summary mode (no recent activity)", {
         sessions: sessions.length,
         contextLength: additionalContext.length
       });

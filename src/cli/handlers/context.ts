@@ -1,12 +1,22 @@
 /**
  * Context Handler - SessionStart
  *
- * Injects a COMPACT summary (~2K tokens) of the most recent session for this
- * project. Full details are available on demand via MCP tools (search, timeline,
- * get_observations). This keeps token usage low while still orienting Claude.
+ * Two modes:
+ *
+ * 1. RECOVERY MODE (default when there's recent activity in the project)
+ *    Dumps the last 24 hours of activity in full fidelity — prompts, assistant
+ *    responses, tool uses — up to a token budget. Designed for "I crashed,
+ *    restarted, get me back to where I was" without needing to search.
+ *
+ * 2. SUMMARY MODE (fallback when no recent activity)
+ *    Compact ~2K token summary of the most substantial recent session.
+ *    For when you're returning to a project after days/weeks away.
+ *
+ * Configurable via env vars:
+ *   CLAUDE_RECALL_RECOVERY_WINDOW_HOURS   (default: 24)
+ *   CLAUDE_RECALL_RECOVERY_BUDGET_TOKENS  (default: 200000, max practical: 1000000)
  *
  * The repo directory is the anchor — works after crashes, reboots, or new sessions.
- *
  * Queries SQLite directly. No worker daemon.
  */
 
@@ -15,8 +25,16 @@ import { openDatabase } from '../../services/sqlite/DirectDB.js';
 import { getProjectContext } from '../../utils/project-name.js';
 import { logger } from '../../utils/logger.js';
 
-/** Compact summary budget: ~2000 tokens */
+/** Compact summary budget (fallback mode): ~2000 tokens */
 const MAX_SUMMARY_CHARS = 8000;
+
+/** Recovery window in hours — how recent must activity be to trigger recovery mode */
+const RECOVERY_WINDOW_HOURS = Number(process.env.CLAUDE_RECALL_RECOVERY_WINDOW_HOURS) || 24;
+
+/** Recovery budget in tokens — uses ~4 chars/token approximation */
+const RECOVERY_BUDGET_TOKENS = Number(process.env.CLAUDE_RECALL_RECOVERY_BUDGET_TOKENS) || 200_000;
+const CHARS_PER_TOKEN = 4;
+const RECOVERY_BUDGET_CHARS = RECOVERY_BUDGET_TOKENS * CHARS_PER_TOKEN;
 
 interface RawObsRow {
   id: number;
@@ -41,21 +59,128 @@ interface SessionRow {
   started_at_epoch: number;
 }
 
+interface SessionWithActivity extends SessionRow {
+  last_activity_epoch: number | null;
+}
+
 /**
- * Build a compact summary of the most recent session.
- * Shows: prompts (truncated), unique files touched, commands run, Claude's key responses.
- * Full detail available via MCP tools.
+ * Format "X minutes ago" / "X hours ago" / "X days ago".
  */
-function buildCompactSummary(db: any, session: SessionRow): string {
+function formatTimeAgo(epoch: number, now: number): string {
+  const seconds = now - epoch;
+  if (seconds < 60) return 'just now';
+  if (seconds < 3600) {
+    const m = Math.floor(seconds / 60);
+    return `${m} minute${m === 1 ? '' : 's'} ago`;
+  }
+  if (seconds < 86400) {
+    const h = Math.floor(seconds / 3600);
+    return `${h} hour${h === 1 ? '' : 's'} ago`;
+  }
+  const d = Math.floor(seconds / 86400);
+  return `${d} day${d === 1 ? '' : 's'} ago`;
+}
+
+/**
+ * Format a tool use for the recovery dump — compact but informative.
+ */
+function formatToolUse(o: RawObsRow): string {
+  let input: any = o.tool_input;
+  try { input = JSON.parse(input ?? ''); } catch {}
+
+  if (['Read', 'Write', 'Edit'].includes(o.tool_name) && input?.file_path) {
+    return `- **${o.tool_name}** ${input.file_path}`;
+  }
+  if (o.tool_name === 'Bash' && input?.command) {
+    const cmd = typeof input.command === 'string' ? input.command : JSON.stringify(input.command);
+    return `- **Bash**: \`${cmd.slice(0, 200)}${cmd.length > 200 ? '...' : ''}\``;
+  }
+  if ((o.tool_name === 'Grep' || o.tool_name === 'Glob') && input?.pattern) {
+    return `- **${o.tool_name}** "${input.pattern}"${input.path ? ` in ${input.path}` : ''}`;
+  }
+  if (o.tool_name === 'WebFetch' && input?.url) {
+    return `- **WebFetch** ${input.url}`;
+  }
+  if (o.tool_name === 'WebSearch' && input?.query) {
+    return `- **WebSearch** "${input.query}"`;
+  }
+  return `- **${o.tool_name}**`;
+}
+
+/**
+ * Build a full-fidelity recovery dump of the most recent session(s).
+ * Returns null if no sessions are within the recovery window.
+ */
+function buildRecoveryContext(db: any, projects: string[]): string | null {
+  const placeholders = projects.map(() => '?').join(',');
+  const cutoffEpoch = Math.floor(Date.now() / 1000) - RECOVERY_WINDOW_HOURS * 3600;
+
+  // Find sessions with activity (prompts or observations) in the recovery window
+  const sessions = db.prepare(
+    `SELECT s.content_session_id, s.project, s.status, s.prompt_counter,
+            s.started_at, s.started_at_epoch,
+            (SELECT MAX(created_at_epoch) FROM raw_observations
+             WHERE content_session_id = s.content_session_id) as last_activity_epoch
+     FROM sdk_sessions s
+     WHERE s.project IN (${placeholders})
+       AND s.prompt_counter > 0
+       AND COALESCE(
+         (SELECT MAX(created_at_epoch) FROM raw_observations
+          WHERE content_session_id = s.content_session_id),
+         s.started_at_epoch
+       ) > ?
+     ORDER BY COALESCE(
+       (SELECT MAX(created_at_epoch) FROM raw_observations
+        WHERE content_session_id = s.content_session_id),
+       s.started_at_epoch
+     ) DESC`
+  ).all(...projects, cutoffEpoch) as SessionWithActivity[];
+
+  if (sessions.length === 0) return null;
+
+  const now = Math.floor(Date.now() / 1000);
+  const lines: string[] = [];
+
+  // Header
+  const mostRecent = sessions[0];
+  const lastEpoch = mostRecent.last_activity_epoch ?? mostRecent.started_at_epoch;
+  const timeAgo = formatTimeAgo(lastEpoch, now);
+
+  lines.push(`# Session Recovery — ${mostRecent.project}`);
+  lines.push(`Last activity: ${timeAgo}. Recovered ${sessions.length} session(s) from the last ${RECOVERY_WINDOW_HOURS} hours.`);
+  lines.push(`This is a full-fidelity dump of recent work — pick up where you left off.`);
+  lines.push(`For older history, use MCP tools (search, timeline, get_observations).\n`);
+
+  let used = lines.join('\n').length;
+
+  // Dump each session newest-first until budget is exhausted
+  for (const session of sessions) {
+    if (used > RECOVERY_BUDGET_CHARS - 1000) {
+      lines.push(`\n---\n*${sessions.length - sessions.indexOf(session)} more session(s) within window — budget exhausted. Use MCP search for older detail.*`);
+      break;
+    }
+
+    const dump = buildSessionDump(db, session, RECOVERY_BUDGET_CHARS - used);
+    if (dump) {
+      lines.push(dump);
+      used += dump.length;
+    }
+  }
+
+  return lines.join('\n').trim();
+}
+
+/**
+ * Build a full dump for a single session, respecting the given budget.
+ */
+function buildSessionDump(db: any, session: SessionWithActivity, budget: number): string {
   const sid = session.content_session_id;
 
-  // Get prompts
   const prompts = db.prepare(
     `SELECT prompt_number, prompt_text FROM user_prompts
      WHERE content_session_id = ? ORDER BY prompt_number ASC`
   ).all(sid) as PromptRow[];
 
-  // Get observations (exclude _assistant_responses for the summary)
   const observations = db.prepare(
     `SELECT id, content_session_id, tool_name, tool_input, tool_response, prompt_number
      FROM raw_observations
@@ -63,7 +188,7 @@ function buildCompactSummary(db: any, session: SessionRow): string {
      ORDER BY id ASC`
   ).all(sid) as RawObsRow[];
 
-  // Get assistant responses
+  // Get assistant responses snapshot
   const assistantRow = db.prepare(
     `SELECT tool_response FROM raw_observations
      WHERE content_session_id = ? AND tool_name = '_assistant_responses'
@@ -79,7 +204,97 @@ function buildCompactSummary(db: any, session: SessionRow): string {
     assistantByPrompt.set(r.prompt_number, r.text);
   }
 
-  // Extract unique files touched
+  // Group observations by prompt_number
+  const observationsByPrompt = new Map<number, RawObsRow[]>();
+  for (const obs of observations) {
+    const p = obs.prompt_number ?? 0;
+    if (!observationsByPrompt.has(p)) observationsByPrompt.set(p, []);
+    observationsByPrompt.get(p)!.push(obs);
+  }
+
+  // Build dump
+  const lines: string[] = [];
+  const statusLabel = session.status === 'active' ? 'interrupted' : session.status;
+  const sessionDate = new Date(session.started_at_epoch * 1000).toISOString().replace('T', ' ').slice(0, 19);
+
+  lines.push(`\n---\n## Session ${sessionDate} UTC (${statusLabel}) — ${session.prompt_counter} prompt(s), ${observations.length} tool use(s)\n`);
+  let used = lines.join('\n').length;
+
+  for (const p of prompts) {
+    if (used > budget - 500) break;
+
+    // Full prompt text
+    const promptBlock = `### Prompt ${p.prompt_number}\n> ${p.prompt_text.replace(/\n/g, '\n> ')}\n`;
+    if (used + promptBlock.length > budget - 200) break;
+    lines.push(promptBlock);
+    used += promptBlock.length;
+
+    // Full assistant response (truncate gracefully if it would overshoot)
+    const resp = assistantByPrompt.get(p.prompt_number);
+    if (resp) {
+      const respBlock = `\n**Claude:** ${resp}\n`;
+      if (used + respBlock.length > budget - 200) {
+        const remaining = budget - used - 300;
+        if (remaining > 200) {
+          lines.push(respBlock.slice(0, remaining) + '\n...[truncated for budget]\n');
+          used += remaining + 30;
+        }
+        break;
+      }
+      lines.push(respBlock);
+      used += respBlock.length;
+    }
+
+    // Tool uses for this prompt — compact one-liners
+    const obs = observationsByPrompt.get(p.prompt_number) ?? [];
+    if (obs.length > 0) {
+      const toolLines = ['\n#### Tool uses', ...obs.map(formatToolUse)];
+      const toolBlock = toolLines.join('\n') + '\n';
+      if (used + toolBlock.length < budget - 100) {
+        lines.push(toolBlock);
+        used += toolBlock.length;
+      }
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Build a compact summary of the most recent session.
+ * Shows: prompts (truncated), unique files touched, commands run, Claude's key responses.
+ * Used as fallback when there's no recent activity within the recovery window.
+ */
+function buildCompactSummary(db: any, session: SessionRow): string {
+  const sid = session.content_session_id;
+
+  const prompts = db.prepare(
+    `SELECT prompt_number, prompt_text FROM user_prompts
+     WHERE content_session_id = ? ORDER BY prompt_number ASC`
+  ).all(sid) as PromptRow[];
+
+  const observations = db.prepare(
+    `SELECT id, content_session_id, tool_name, tool_input, tool_response, prompt_number
+     FROM raw_observations
+     WHERE content_session_id = ? AND tool_name != '_assistant_responses'
+     ORDER BY id ASC`
+  ).all(sid) as RawObsRow[];
+
+  const assistantRow = db.prepare(
+    `SELECT tool_response FROM raw_observations
+     WHERE content_session_id = ? AND tool_name = '_assistant_responses'
+     ORDER BY id DESC LIMIT 1`
+  ).get(sid) as { tool_response: string } | undefined;
+
+  let assistantResponses: Array<{ prompt_number: number; text: string }> = [];
+  if (assistantRow?.tool_response) {
+    try { assistantResponses = JSON.parse(assistantRow.tool_response); } catch {}
+  }
+  const assistantByPrompt = new Map<number, string>();
+  for (const r of assistantResponses) {
+    assistantByPrompt.set(r.prompt_number, r.text);
+  }
+
   const filesTouched = new Set<string>();
   const commandsRun: string[] = [];
   for (const o of observations) {
@@ -103,7 +318,6 @@ function buildCompactSummary(db: any, session: SessionRow): string {
 
   let used = lines.join('\n').length;
 
-  // Show each prompt with truncated text + Claude's response snippet
   for (const p of prompts) {
     if (used > MAX_SUMMARY_CHARS - 200) break;
 
@@ -114,7 +328,6 @@ function buildCompactSummary(db: any, session: SessionRow): string {
     lines.push(pLine);
     used += pLine.length;
 
-    // Add Claude's response snippet if available
     const resp = assistantByPrompt.get(p.prompt_number);
     if (resp && used < MAX_SUMMARY_CHARS - 200) {
       const respSnippet = resp.length > 400 ? resp.slice(0, 400) + '...' : resp;
@@ -124,7 +337,6 @@ function buildCompactSummary(db: any, session: SessionRow): string {
     }
   }
 
-  // Show files touched
   if (filesTouched.size > 0 && used < MAX_SUMMARY_CHARS - 200) {
     const fileList = [...filesTouched].slice(0, 15);
     lines.push(`\n### Files touched (${filesTouched.size}):`);
@@ -137,7 +349,6 @@ function buildCompactSummary(db: any, session: SessionRow): string {
     if (filesTouched.size > 15) lines.push(`- ...and ${filesTouched.size - 15} more\n`);
   }
 
-  // Show key commands
   if (commandsRun.length > 0 && used < MAX_SUMMARY_CHARS - 200) {
     const cmds = commandsRun.slice(0, 8);
     lines.push(`\n### Commands run (${commandsRun.length}):`);
@@ -150,56 +361,6 @@ function buildCompactSummary(db: any, session: SessionRow): string {
   }
 
   return lines.join('\n').trim();
-}
-
-/**
- * Get brief summaries of recent activity in OTHER projects.
- * Helps surface cross-project patterns and recent work context.
- */
-function buildCrossProjectSummary(db: any, currentProjects: string[]): string {
-  const placeholders = currentProjects.map(() => '?').join(',');
-  const sevenDaysAgo = Math.floor(Date.now() / 1000) - 7 * 24 * 3600;
-
-  let rows: Array<{ project: string; last_active: number; session_count: number }>;
-  try {
-    rows = db.prepare(
-      `SELECT project, MAX(started_at_epoch) as last_active, COUNT(*) as session_count
-       FROM sdk_sessions
-       WHERE project NOT IN (${placeholders}) AND started_at_epoch > ?
-       GROUP BY project
-       ORDER BY last_active DESC
-       LIMIT 5`
-    ).all(...currentProjects, sevenDaysAgo);
-  } catch {
-    return '';
-  }
-
-  if (!rows || rows.length === 0) return '';
-
-  const lines = ['## Recent Activity in Other Projects'];
-  let used = lines[0].length;
-
-  for (const r of rows) {
-    if (used > MAX_CROSS_PROJECT_CHARS - 100) break;
-
-    // Get most recent prompt from that project
-    let snippet = '';
-    try {
-      const recentPrompt = db.prepare(
-        `SELECT up.prompt_text FROM user_prompts up
-         JOIN sdk_sessions s ON s.content_session_id = up.content_session_id
-         WHERE s.project = ?
-         ORDER BY up.created_at_epoch DESC LIMIT 1`
-      ).get(r.project) as { prompt_text: string } | undefined;
-      snippet = recentPrompt?.prompt_text?.slice(0, 80)?.replace(/\n/g, ' ') || '';
-    } catch {}
-
-    const line = `- **${r.project}** (${r.session_count} sessions): ${snippet}`;
-    lines.push(line);
-    used += line.length;
-  }
-
-  return lines.join('\n');
 }
 
 /**
@@ -221,7 +382,7 @@ function getConsolidatedContext(db: any, projects: string[], currentLength: numb
        LIMIT 5`
     ).all(...projects);
   } catch {
-    return ''; // table may not exist yet
+    return '';
   }
 
   if (!rows || rows.length === 0) return '';
@@ -250,8 +411,27 @@ export const contextHandler: EventHandler = {
 
     try {
       const projects = context.allProjects;
-      const placeholders = projects.map(() => '?').join(',');
 
+      // ─── RECOVERY MODE ───
+      // If there's recent activity within the window, dump it in full fidelity.
+      const recoveryContext = buildRecoveryContext(db, projects);
+      if (recoveryContext) {
+        logger.debug('HOOK', 'Recovery mode active', {
+          contextLength: recoveryContext.length,
+          windowHours: RECOVERY_WINDOW_HOURS,
+          budgetTokens: RECOVERY_BUDGET_TOKENS
+        });
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'SessionStart',
+            additionalContext: recoveryContext
+          }
+        };
+      }
+
+      // ─── SUMMARY MODE (fallback) ───
+      // No recent activity — provide compact summary of best historical session.
+      const placeholders = projects.map(() => '?').join(',');
       const sessions = db.prepare(
         `SELECT content_session_id, project, status, prompt_counter, started_at, started_at_epoch
          FROM sdk_sessions
@@ -269,8 +449,7 @@ export const contextHandler: EventHandler = {
         };
       }
 
-      // Pick the most substantial recent session (most prompts among the last 5).
-      // A 1-prompt "what was I doing?" session is less useful than a 10-prompt coding session.
+      // Pick most substantial recent session
       const withPrompts = sessions.filter(s => s.prompt_counter > 0);
       const bestSession = withPrompts.length > 0
         ? withPrompts.reduce((a, b) => a.prompt_counter >= b.prompt_counter ? a : b)
@@ -287,10 +466,7 @@ export const contextHandler: EventHandler = {
         }
       }
 
-      // Cross-project recall is available on-demand via MCP search(cross_project=true)
-      // Not injected automatically to keep context focused on the current project.
-
-      logger.debug('HOOK', 'Context generated', {
+      logger.debug('HOOK', 'Summary mode (no recent activity)', {
         sessions: sessions.length,
         contextLength: additionalContext.length
       });
