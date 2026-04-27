@@ -10,7 +10,7 @@
     "sqlite",
     "hooks"
   ],
-  "author": "AskQ AI",
+  "author": "Richard Chow <askqai@mitns.com>",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

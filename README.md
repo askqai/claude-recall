@@ -765,4 +765,4 @@ Sensitive content (API keys, tokens, passwords) is automatically redacted before
 
 [Apache-2.0](LICENSE)
 
-Copyright 2025 AskQ AI
+Copyright 2026 Workweek — Richard Chow <askqai@mitns.com>
