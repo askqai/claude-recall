@@ -9,7 +9,7 @@
       "name": "claude-recall",
       "source": ".",
       "description": "Lightweight persistent memory for Claude Code with full-fidelity Recovery Mode",
-      "version": "11.3.0"
+      "version": "11.4.0"
     }
   ]
 }

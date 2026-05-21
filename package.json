@@ -1,6 +1,6 @@
 {
   "name": "claude-recall",
-  "version": "11.3.0",
+  "version": "11.4.0",
   "description": "Persistent memory system for Claude Code - captures tool usage and injects context into future sessions",
   "keywords": [
     "claude",
