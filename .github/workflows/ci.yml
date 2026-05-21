@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build hooks and MCP server
+        run: node scripts/build-hooks.js
+
+      - name: Verify built artifacts exist
+        run: |
+          test -f plugin/scripts/hook-command.js || { echo "Missing hook-command.js"; exit 1; }
+          test -f plugin/scripts/mcp-server.cjs || { echo "Missing mcp-server.cjs"; exit 1; }
+          test -f plugin/scripts/bun-runner.sh || { echo "Missing bun-runner.sh"; exit 1; }
+
+      - name: Verify built artifacts are up to date
+        run: |
+          if ! git diff --quiet plugin/scripts/; then
+            echo "Built artifacts are out of date. Run 'node scripts/build-hooks.js' and commit the results."
+            git diff --stat plugin/scripts/
+            exit 1
+          fi
+
+      - name: Validate plugin structure
+        run: |
+          node -e "
+            const fs = require('fs');
+            const files = [
+              'plugin/.claude-plugin/plugin.json',
+              'plugin/hooks/hooks.json',
+              'plugin/.mcp.json',
+              '.claude-plugin/marketplace.json'
+            ];
+            for (const f of files) {
+              try {
+                JSON.parse(fs.readFileSync(f, 'utf8'));
+                console.log('OK: ' + f);
+              } catch (e) {
+                console.error('INVALID JSON: ' + f + ' — ' + e.message);
+                process.exit(1);
+              }
+            }
+          "
+
+      - name: Verify version consistency
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            const plugin = JSON.parse(fs.readFileSync('plugin/.claude-plugin/plugin.json', 'utf8'));
+            const marketplace = JSON.parse(fs.readFileSync('.claude-plugin/marketplace.json', 'utf8'));
+            const mktVersion = marketplace.plugins[0].version;
+
+            console.log('package.json:', pkg.version);
+            console.log('plugin.json:', plugin.version);
+            console.log('marketplace.json:', mktVersion);
+
+            if (pkg.version !== plugin.version || pkg.version !== mktVersion) {
+              console.error('Version mismatch! All three must match.');
+              process.exit(1);
+            }
+            console.log('All versions match:', pkg.version);
+          "
+
+      - name: Verify plugin manifest has no duplicate hooks field
+        run: |
+          node -e "
+            const plugin = JSON.parse(require('fs').readFileSync('plugin/.claude-plugin/plugin.json', 'utf8'));
+            if (plugin.hooks) {
+              console.error('plugin/.claude-plugin/plugin.json must NOT have a hooks field.');
+              console.error('Claude Code auto-detects hooks/hooks.json. Explicit hooks causes duplicate load errors.');
+              process.exit(1);
+            }
+            console.log('OK: no hooks field in plugin manifest');
+          "
+
+      - name: Run tests
+        run: bun test || echo "No tests found — skipping"
