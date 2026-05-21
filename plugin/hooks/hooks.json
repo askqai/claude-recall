@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/plugin/scripts/bun-runner.sh\" \"${CLAUDE_PLUGIN_ROOT}/plugin/scripts/hook-command.js\" claude-code context",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.js\" claude-code context",
             "timeout": 10
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/plugin/scripts/bun-runner.sh\" \"${CLAUDE_PLUGIN_ROOT}/plugin/scripts/hook-command.js\" claude-code session-init",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.js\" claude-code session-init",
             "timeout": 5
           }
         ]
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/plugin/scripts/bun-runner.sh\" \"${CLAUDE_PLUGIN_ROOT}/plugin/scripts/hook-command.js\" claude-code observation",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.js\" claude-code observation",
             "timeout": 5
           }
         ]
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/plugin/scripts/bun-runner.sh\" \"${CLAUDE_PLUGIN_ROOT}/plugin/scripts/hook-command.js\" claude-code summarize",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.js\" claude-code summarize",
             "timeout": 5
           }
         ]
@@ -52,7 +52,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/plugin/scripts/bun-runner.sh\" \"${CLAUDE_PLUGIN_ROOT}/plugin/scripts/hook-command.js\" claude-code session-end",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.js\" claude-code session-end",
             "timeout": 5
           }
         ]
