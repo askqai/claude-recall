@@ -9,8 +9,11 @@
     {
       "name": "claude-recall",
       "source": {
-        "source": "github",
-        "repo": "askqai/claude-recall"
+        "source": "git-subdir",
+        "url": "https://github.com/askqai/claude-recall.git",
+        "path": ".",
+        "ref": "main",
+        "sha": "f5f9f4064f2885f3b2abe3c0f2958cae8e7b0d28"
       },
       "description": "Lightweight persistent memory for Claude Code with full-fidelity Recovery Mode",
       "version": "11.4.0"
