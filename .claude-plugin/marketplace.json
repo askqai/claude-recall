@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "claude-recall",
-      "source": ".",
+      "source": "./",
       "description": "Lightweight persistent memory for Claude Code with full-fidelity Recovery Mode",
       "version": "11.4.0"
     }
