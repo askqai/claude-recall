@@ -256,14 +256,7 @@ For multi-session features (which is most real work), Recovery Mode aggregates 3
 
 That's it. Restart Claude Code and Recovery Mode will start working automatically. The plugin includes hooks (data capture) and the MCP server (search/forget tools) — both registered in one step.
 
-**Optional but recommended:** Inject usage instructions into your global Claude Code config so Claude always knows how to use the recall tools properly:
-
-```bash
-# Run from the plugin directory (one-time, idempotent)
-bash ~/.claude/plugins/claude-recall/scripts/inject-instructions.sh
-```
-
-This appends a short section to `~/.claude/CLAUDE.md` teaching Claude the 3-layer search workflow. Without it, Claude may treat search results as final answers instead of drilling down to full content.
+On your first session, claude-recall automatically injects usage instructions into `~/.claude/CLAUDE.md` so Claude always knows the 3-layer search pattern. No manual setup needed.
 
 **Prerequisite:** [Bun](https://bun.sh) must be installed (`curl -fsSL https://bun.sh/install | bash`). Everything else is bundled.
 
@@ -479,15 +472,7 @@ Open (or create) `~/.claude.json` and add the MCP server:
 
 > **Note:** `~/.claude.json` is the **global** Claude Code config (not the per-project `.claude/settings.json`). If the file doesn't exist, create it with the JSON above.
 
-### Step 5: Inject Usage Instructions (Recommended)
-
-```bash
-bash /absolute/path/to/claude-recall/scripts/inject-instructions.sh
-```
-
-This appends a short section to `~/.claude/CLAUDE.md` so Claude knows the 3-layer search pattern. Idempotent — safe to run multiple times.
-
-### Step 6: Restart Claude Code
+### Step 5: Restart Claude Code
 
 Close and reopen Claude Code (or start a new session). You should see the previous session summary injected at the start of your conversation.
 
