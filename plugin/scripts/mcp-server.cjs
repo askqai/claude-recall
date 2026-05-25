@@ -22037,6 +22037,7 @@ function handleGetObservations(args) {
   if (!ids || ids.length === 0) {
     return { content: [{ type: "text", text: "Error: ids array is required" }] };
   }
+  const maxLen = typeof args.max_length === "number" ? Math.min(Math.max(args.max_length, 100), 5e4) : 2e3;
   const { rawIds, legacyIds, consolidatedIds } = parseIds(ids);
   const results = [];
   if (rawIds.length > 0) {
@@ -22051,8 +22052,8 @@ function handleGetObservations(args) {
         session: r.content_session_id,
         project: r.project,
         tool_name: r.tool_name,
-        tool_input: r.tool_input ? truncate(r.tool_input, 2e3) : null,
-        tool_response: r.tool_response ? truncate(r.tool_response, 2e3) : null,
+        tool_input: r.tool_input ? truncate(r.tool_input, maxLen) : null,
+        tool_response: r.tool_response ? truncate(r.tool_response, maxLen) : null,
         cwd: r.cwd,
         prompt_number: r.prompt_number,
         created_at: r.created_at
@@ -22074,9 +22075,9 @@ function handleGetObservations(args) {
           type: r.type,
           title: r.title,
           subtitle: r.subtitle,
-          text: r.text ? truncate(r.text, 1e3) : null,
+          text: r.text ? truncate(r.text, maxLen) : null,
           facts: r.facts,
-          narrative: r.narrative ? truncate(r.narrative, 1e3) : null,
+          narrative: r.narrative ? truncate(r.narrative, maxLen) : null,
           created_at: r.created_at
         });
       }
@@ -22270,7 +22271,7 @@ Prefix R: = raw observations, L: = legacy observations, C: = consolidated sessio
   },
   {
     name: "get_observations",
-    description: "Step 3: Fetch full details for filtered IDs. Params: ids (array of observation IDs)",
+    description: "Step 3: Fetch full details for filtered IDs. Params: ids (array of observation IDs), max_length (optional, default 2000)",
     inputSchema: {
       type: "object",
       properties: {
@@ -22278,6 +22279,10 @@ Prefix R: = raw observations, L: = legacy observations, C: = consolidated sessio
           type: "array",
           items: { oneOf: [{ type: "number" }, { type: "string" }] },
           description: "Array of observation IDs \u2014 use R:1 for raw, L:5 for legacy, or plain numbers"
+        },
+        max_length: {
+          type: "number",
+          description: "Max characters per field (default 2000, max 50000). Use higher values to retrieve full file contents."
         }
       },
       required: ["ids"],

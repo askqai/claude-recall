@@ -658,12 +658,15 @@ Returns chronological context (hours before/after the anchor):
 
 ```
 get_observations(ids=["R:142", "R:141", "C:3"])
+get_observations(ids=["R:142"], max_length=10000)
 ```
 
 Returns complete records with tool input, response, cwd, etc. Accepts prefixed IDs:
 - `R:` — raw observations
 - `L:` — legacy observations
 - `C:` — consolidated sessions
+
+Optional `max_length` parameter controls per-field truncation (default 2000, max 50000). Use higher values to retrieve full file contents from large Write or Read operations.
 
 ### `forget` — Delete observations
 
