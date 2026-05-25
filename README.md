@@ -563,7 +563,7 @@ PostToolUse fires
 Check privacy_suppressed flag ──── Yes ──→ Skip (return early)
     │ No
     ▼
-Truncate payloads (10KB cap)
+Truncate payloads (50KB cap)
     │
     ▼
 Detect & redact sensitive patterns
