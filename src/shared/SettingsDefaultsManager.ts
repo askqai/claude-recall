@@ -50,6 +50,8 @@ export interface SettingsDefaults {
   // Feature Toggles
   CLAUDE_RECALL_CONTEXT_SHOW_LAST_SUMMARY: string;
   CLAUDE_RECALL_CONTEXT_SHOW_LAST_MESSAGE: string;
+  // Privacy
+  CLAUDE_RECALL_REDACT_SECRETS: string;
 }
 
 export class SettingsDefaultsManager {
@@ -94,6 +96,8 @@ export class SettingsDefaultsManager {
     // Feature Toggles
     CLAUDE_RECALL_CONTEXT_SHOW_LAST_SUMMARY: 'true',
     CLAUDE_RECALL_CONTEXT_SHOW_LAST_MESSAGE: 'false',
+    // Privacy
+    CLAUDE_RECALL_REDACT_SECRETS: 'true',
   };
 
   /**

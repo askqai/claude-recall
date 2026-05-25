@@ -100,6 +100,10 @@ Nothing from that interaction is stored.
 | OpenAI keys | `sk-xxxx...` → `[REDACTED:OPENAI_KEY]` |
 | Slack tokens | `xoxb-xxxx...` → `[REDACTED:SLACK_TOKEN]` |
 
+> **Why redaction is on by default:** The SQLite database sits unencrypted on disk. Tool calls routinely capture `.env` reads, config files, and Bash output containing tokens. Auto-redaction prevents credentials from accumulating in a file that could be inadvertently shared, backed up to cloud storage, or exposed in a device compromise. Since claude-recall is a *recall* tool (not a secrets manager), the tradeoff favors safety over completeness.
+>
+> **To disable redaction:** Set `CLAUDE_RECALL_REDACT_SECRETS=false` in your environment. This gives you full-fidelity storage at the cost of secrets persisting in the database. Only disable this if you understand the implications and have disk encryption or other controls in place.
+
 **Retroactive deletion** — The `forget` MCP tool deletes matching observations:
 ```
 forget(query="credentials", confirm=false)   # dry run — shows what would be deleted
@@ -848,6 +852,7 @@ scripts/
 | `CLAUDE_RECALL_RECOVERY_WINDOW_HOURS` | `24` | How recent activity must be to trigger Recovery Mode |
 | `CLAUDE_RECALL_RECOVERY_BUDGET_TOKENS` | `200000` | Max tokens injected in Recovery Mode (set `1000000` for extended context) |
 | `CLAUDE_RECALL_WORKER_PORT` | `37777` | Legacy — not used in direct SQLite mode |
+| `CLAUDE_RECALL_REDACT_SECRETS` | `true` | Auto-redact API keys/tokens/passwords before storage. Set `false` for full-fidelity capture (see Security section) |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code config directory |
 
 ## Troubleshooting

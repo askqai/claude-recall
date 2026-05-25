@@ -174,7 +174,9 @@ var SettingsDefaultsManager = class {
     CLAUDE_RECALL_CONTEXT_SESSION_COUNT: "10",
     // Feature Toggles
     CLAUDE_RECALL_CONTEXT_SHOW_LAST_SUMMARY: "true",
-    CLAUDE_RECALL_CONTEXT_SHOW_LAST_MESSAGE: "false"
+    CLAUDE_RECALL_CONTEXT_SHOW_LAST_MESSAGE: "false",
+    // Privacy
+    CLAUDE_RECALL_REDACT_SECRETS: "true"
   };
   /**
    * Get all defaults as an object
@@ -2014,12 +2016,13 @@ var observationHandler = {
       }
       let inputStr = truncateStr(stringify(toolInput), MAX_INPUT_BYTES);
       let responseStr = truncateStr(stringify(toolResponse), MAX_RESPONSE_BYTES);
+      const shouldRedact = (process.env.CLAUDE_RECALL_REDACT_SECRETS ?? "true").toLowerCase() !== "false";
       let redacted = 0;
-      if (inputStr && containsSensitivePatterns(inputStr)) {
+      if (shouldRedact && inputStr && containsSensitivePatterns(inputStr)) {
         inputStr = redactSensitiveContent(inputStr);
         redacted = 1;
       }
-      if (responseStr && containsSensitivePatterns(responseStr)) {
+      if (shouldRedact && responseStr && containsSensitivePatterns(responseStr)) {
         responseStr = redactSensitiveContent(responseStr);
         redacted = 1;
       }

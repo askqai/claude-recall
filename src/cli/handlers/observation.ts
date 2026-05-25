@@ -155,12 +155,14 @@ export const observationHandler: EventHandler = {
       let responseStr = truncateStr(stringify(toolResponse), MAX_RESPONSE_BYTES);
 
       // Auto-redact sensitive content (API keys, tokens, passwords)
+      // Enabled by default for security. Set CLAUDE_RECALL_REDACT_SECRETS=false to disable.
+      const shouldRedact = (process.env.CLAUDE_RECALL_REDACT_SECRETS ?? 'true').toLowerCase() !== 'false';
       let redacted = 0;
-      if (inputStr && containsSensitivePatterns(inputStr)) {
+      if (shouldRedact && inputStr && containsSensitivePatterns(inputStr)) {
         inputStr = redactSensitiveContent(inputStr);
         redacted = 1;
       }
-      if (responseStr && containsSensitivePatterns(responseStr)) {
+      if (shouldRedact && responseStr && containsSensitivePatterns(responseStr)) {
         responseStr = redactSensitiveContent(responseStr);
         redacted = 1;
       }

@@ -21007,7 +21007,9 @@ var SettingsDefaultsManager = class {
     CLAUDE_RECALL_CONTEXT_SESSION_COUNT: "10",
     // Feature Toggles
     CLAUDE_RECALL_CONTEXT_SHOW_LAST_SUMMARY: "true",
-    CLAUDE_RECALL_CONTEXT_SHOW_LAST_MESSAGE: "false"
+    CLAUDE_RECALL_CONTEXT_SHOW_LAST_MESSAGE: "false",
+    // Privacy
+    CLAUDE_RECALL_REDACT_SECRETS: "true"
   };
   /**
    * Get all defaults as an object
