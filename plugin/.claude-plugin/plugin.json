@@ -1,6 +1,6 @@
 {
   "name": "claude-recall",
-  "version": "11.4.0",
+  "version": "11.5.0",
   "description": "Lightweight persistent memory for Claude Code with full-fidelity Recovery Mode. Zero daemons, zero API costs, zero code leaving your machine.",
   "author": {
     "name": "Richard Chow",
