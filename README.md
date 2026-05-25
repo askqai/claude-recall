@@ -773,10 +773,10 @@ Both `raw_observations` and `user_prompts` have FTS5 virtual tables with automat
 
 ### Storage Limits
 
-- **Max DB size:** 10 GB hard limit (enforced by page count check, always active)
+- **Max DB size:** 10 GB default limit, configurable via `CLAUDE_RECALL_MAX_DB_SIZE_GB` (minimum 1 GB)
 - **Consolidation:** Per project, keeps last 20 sessions with full detail; older ones compressed into summaries
 - **Decay:** Observations >90 days have relevance scores halved (floor at 0.05)
-- **Cleanup strategy:** When DB exceeds 10GB, deletes by lowest `relevance_score` first, then oldest
+- **Cleanup strategy:** When DB exceeds the configured limit, deletes by lowest `relevance_score` first, then oldest. If you lower the limit below the current DB size, cleanup converges gradually (10% per cycle) with a warning log
 - **Cleanup frequency:** All three layers run probabilistically on ~1% of PostToolUse invocations
 - **Input/response cap:** 50 KB per field (larger payloads truncated with `...[truncated]` marker)
 
@@ -853,6 +853,7 @@ scripts/
 | `CLAUDE_RECALL_RECOVERY_BUDGET_TOKENS` | `200000` | Max tokens injected in Recovery Mode (set `1000000` for extended context) |
 | `CLAUDE_RECALL_WORKER_PORT` | `37777` | Legacy — not used in direct SQLite mode |
 | `CLAUDE_RECALL_REDACT_SECRETS` | `true` | Auto-redact API keys/tokens/passwords before storage. Set `false` for full-fidelity capture (see Security section) |
+| `CLAUDE_RECALL_MAX_DB_SIZE_GB` | `10` | Max database size in GB before cleanup triggers (minimum 1). Lowering below current size converges gradually |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code config directory |
 
 ## Troubleshooting

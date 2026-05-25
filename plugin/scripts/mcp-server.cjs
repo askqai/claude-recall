@@ -21009,7 +21009,9 @@ var SettingsDefaultsManager = class {
     CLAUDE_RECALL_CONTEXT_SHOW_LAST_SUMMARY: "true",
     CLAUDE_RECALL_CONTEXT_SHOW_LAST_MESSAGE: "false",
     // Privacy
-    CLAUDE_RECALL_REDACT_SECRETS: "true"
+    CLAUDE_RECALL_REDACT_SECRETS: "true",
+    // Storage Limits
+    CLAUDE_RECALL_MAX_DB_SIZE_GB: "10"
   };
   /**
    * Get all defaults as an object

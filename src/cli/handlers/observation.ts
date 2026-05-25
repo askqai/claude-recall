@@ -20,8 +20,9 @@ import { consolidateOldSessions, applyTimeDecay, smartCleanup } from '../../serv
 const MAX_RESPONSE_BYTES = 50_000;
 /** Max size for tool_input storage (50KB). */
 const MAX_INPUT_BYTES = 50_000;
-/** Max database page count before cleanup triggers. 10GB / 4096 = 2,621,440 pages */
-const MAX_DB_PAGES = 2_621_440;
+/** Default max DB size in GB. Configurable via CLAUDE_RECALL_MAX_DB_SIZE_GB. */
+const DEFAULT_MAX_DB_SIZE_GB = 10;
+const PAGE_SIZE = 4096;
 /** Only check DB size ~1% of the time to avoid overhead */
 const CLEANUP_PROBABILITY = 0.01;
 /** Delete oldest 10% of raw_observations when over size limit */
@@ -218,13 +219,17 @@ export const observationHandler: EventHandler = {
         // Decay relevance scores for observations older than 30 days
         applyTimeDecay(db);
 
-        // Size-based cleanup: delete low-relevance observations when DB exceeds 10GB
+        // Size-based cleanup: delete low-relevance observations when DB exceeds configured limit
+        const maxSizeGb = Math.max(1, parseFloat(process.env.CLAUDE_RECALL_MAX_DB_SIZE_GB ?? '') || DEFAULT_MAX_DB_SIZE_GB);
+        const maxPages = Math.floor(maxSizeGb * 1024 * 1024 * 1024 / PAGE_SIZE);
         const pageCount = (db.prepare('PRAGMA page_count').get() as { page_count: number })?.page_count ?? 0;
-        if (pageCount > MAX_DB_PAGES) {
+        if (pageCount > maxPages) {
+          const currentSizeMb = Math.round(pageCount * PAGE_SIZE / 1024 / 1024);
+          const limitMb = Math.round(maxSizeGb * 1024);
+          logger.warn('HOOK', `Database size (${currentSizeMb}MB) exceeds configured limit (${limitMb}MB) — cleanup in progress, removing lowest-relevance 10% of observations`);
           const totalRows = (db.prepare('SELECT COUNT(*) as cnt FROM raw_observations').get() as { cnt: number })?.cnt ?? 0;
           const deleteCount = Math.max(100, Math.floor(totalRows * CLEANUP_BATCH_PERCENT));
           smartCleanup(db, deleteCount);
-          logger.info('HOOK', `Size cleanup triggered (DB was ${Math.round(pageCount * 4096 / 1024 / 1024)}MB, limit 10GB)`);
         }
       }
 

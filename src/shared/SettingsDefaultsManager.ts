@@ -52,6 +52,8 @@ export interface SettingsDefaults {
   CLAUDE_RECALL_CONTEXT_SHOW_LAST_MESSAGE: string;
   // Privacy
   CLAUDE_RECALL_REDACT_SECRETS: string;
+  // Storage Limits
+  CLAUDE_RECALL_MAX_DB_SIZE_GB: string;
 }
 
 export class SettingsDefaultsManager {
@@ -98,6 +100,8 @@ export class SettingsDefaultsManager {
     CLAUDE_RECALL_CONTEXT_SHOW_LAST_MESSAGE: 'false',
     // Privacy
     CLAUDE_RECALL_REDACT_SECRETS: 'true',
+    // Storage Limits
+    CLAUDE_RECALL_MAX_DB_SIZE_GB: '10',
   };
 
   /**

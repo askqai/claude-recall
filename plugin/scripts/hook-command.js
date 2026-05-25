@@ -176,7 +176,9 @@ var SettingsDefaultsManager = class {
     CLAUDE_RECALL_CONTEXT_SHOW_LAST_SUMMARY: "true",
     CLAUDE_RECALL_CONTEXT_SHOW_LAST_MESSAGE: "false",
     // Privacy
-    CLAUDE_RECALL_REDACT_SECRETS: "true"
+    CLAUDE_RECALL_REDACT_SECRETS: "true",
+    // Storage Limits
+    CLAUDE_RECALL_MAX_DB_SIZE_GB: "10"
   };
   /**
    * Get all defaults as an object
@@ -1923,7 +1925,8 @@ function smartCleanup(db, deleteCount) {
 // src/cli/handlers/observation.ts
 var MAX_RESPONSE_BYTES = 5e4;
 var MAX_INPUT_BYTES = 5e4;
-var MAX_DB_PAGES = 2621440;
+var DEFAULT_MAX_DB_SIZE_GB = 10;
+var PAGE_SIZE = 4096;
 var CLEANUP_PROBABILITY = 0.01;
 var CLEANUP_BATCH_PERCENT = 0.1;
 var TRANSCRIPT_CAPTURE_INTERVAL = 600;
@@ -2060,12 +2063,16 @@ var observationHandler = {
       if (Math.random() < CLEANUP_PROBABILITY) {
         consolidateOldSessions(db);
         applyTimeDecay(db);
+        const maxSizeGb = Math.max(1, parseFloat(process.env.CLAUDE_RECALL_MAX_DB_SIZE_GB ?? "") || DEFAULT_MAX_DB_SIZE_GB);
+        const maxPages = Math.floor(maxSizeGb * 1024 * 1024 * 1024 / PAGE_SIZE);
         const pageCount = db.prepare("PRAGMA page_count").get()?.page_count ?? 0;
-        if (pageCount > MAX_DB_PAGES) {
+        if (pageCount > maxPages) {
+          const currentSizeMb = Math.round(pageCount * PAGE_SIZE / 1024 / 1024);
+          const limitMb = Math.round(maxSizeGb * 1024);
+          logger.warn("HOOK", `Database size (${currentSizeMb}MB) exceeds configured limit (${limitMb}MB) \u2014 cleanup in progress, removing lowest-relevance 10% of observations`);
           const totalRows = db.prepare("SELECT COUNT(*) as cnt FROM raw_observations").get()?.cnt ?? 0;
           const deleteCount = Math.max(100, Math.floor(totalRows * CLEANUP_BATCH_PERCENT));
           smartCleanup(db, deleteCount);
-          logger.info("HOOK", `Size cleanup triggered (DB was ${Math.round(pageCount * 4096 / 1024 / 1024)}MB, limit 10GB)`);
         }
       }
       logger.debug("HOOK", "Raw observation stored", { toolName });
